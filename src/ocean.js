@@ -20,12 +20,15 @@ import * as THREE from "three";
 // 9 ship-lengths, which is what an Atlantic swell looks like from a caravel's
 // deck. Amplitudes are deliberately generous; a physically-scaled sea reads as
 // flat on a screen.
+// Amplitudes sum to about 2.6 units against a hull with roughly 3.5 units of
+// freeboard. They used to sum to 6.3, which is a survival storm for a 26-unit
+// caravel: the sea stood higher than her deck and washed straight through it.
 export const WAVES = [
-  { dir: [1.00, 0.16],   amp: 3.10, len: 240, speed: 0.62, steep: 0.90 },
-  { dir: [0.62, 0.79],   amp: 1.70, len: 132, speed: 0.86, steep: 0.80 },
-  { dir: [-0.48, 0.88],  amp: 0.86, len: 68,  speed: 1.15, steep: 0.68 },
-  { dir: [0.28, -0.96],  amp: 0.42, len: 34,  speed: 1.55, steep: 0.56 },
-  { dir: [-0.92, -0.39], amp: 0.21, len: 17,  speed: 2.10, steep: 0.44 },
+  { dir: [1.00, 0.16],   amp: 1.30, len: 240, speed: 0.62, steep: 0.86 },
+  { dir: [0.62, 0.79],   amp: 0.70, len: 132, speed: 0.86, steep: 0.76 },
+  { dir: [-0.48, 0.88],  amp: 0.36, len: 68,  speed: 1.15, steep: 0.64 },
+  { dir: [0.28, -0.96],  amp: 0.18, len: 34,  speed: 1.55, steep: 0.54 },
+  { dir: [-0.92, -0.39], amp: 0.09, len: 17,  speed: 2.10, steep: 0.42 },
 ];
 
 const norm = ([x, z]) => { const l = Math.hypot(x, z) || 1; return [x / l, z / l]; };
