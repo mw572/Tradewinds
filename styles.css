@@ -84,6 +84,28 @@ html, body {
 }
 .blurb { color: var(--ink-dim); margin: 0 auto 26px; max-width: 52ch; }
 .title-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+
+/* Era picker: three cards, the chosen one lit. The years do the work of
+   explaining the difference before any of the copy does. */
+.era-picker { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 4px 0 24px; text-align: left; }
+.era-card {
+  font: inherit; cursor: pointer; text-align: left;
+  background: rgba(255,255,255,.035);
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px 13px; color: var(--ink-dim);
+  transition: border-color .15s, background .15s, transform .08s;
+}
+.era-card:hover { background: rgba(216,169,75,.08); border-color: var(--brass-dim); }
+.era-card.sel { border-color: var(--brass); background: rgba(216,169,75,.13); color: var(--ink); }
+.era-card:active { transform: translateY(1px); }
+.era-year { display: block; font-family: var(--mono); font-size: 10.5px; letter-spacing: .18em; color: var(--brass); }
+.era-name { display: block; font-family: var(--serif); font-size: 17px; color: var(--paper); margin: 2px 0 5px; }
+.era-tag  { display: block; font-size: 11.5px; line-height: 1.45; }
+.era-stats { display: flex; gap: 12px; margin-top: 8px; font-family: var(--mono); font-size: 10px; color: var(--ink-faint); }
+@media (max-width: 720px) {
+  .era-picker { grid-template-columns: 1fr; gap: 7px; }
+  .era-tag { display: none; }
+}
 .hint { margin-top: 22px; font-size: 12.5px; color: var(--ink-faint); }
 .hint b { color: var(--ink-dim); font-weight: 600; }
 

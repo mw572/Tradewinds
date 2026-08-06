@@ -7,16 +7,19 @@ import {
 import {
   GOODS, GOOD, PORTS, PORT, SHIPS, UPGRADES,
   passage, cardinal, dateOf, seasonOf,
+  goodsFor, shipsFor, upgradesFor, ERAS, ERA, ERA_NAMES,
 } from "./world.js";
 import { Voyage } from "./sailing.js";
 import { drawChart as renderChart } from "./chart.js";
 
 const $ = (id) => document.getElementById(id);
-const money = (n) => "£" + Math.round(n).toLocaleString();
-const signed = (n) => (n >= 0 ? "+" : "−") + "£" + Math.abs(Math.round(n)).toLocaleString();
-const SAVE_KEY = "tradewinds.save.v2";
+const sym = () => (state.house ? state.house.era.money : "£");
+const money = (n) => sym() + Math.round(n).toLocaleString();
+const signed = (n) => (n >= 0 ? "+" : "−") + sym() + Math.abs(Math.round(n)).toLocaleString();
+const SAVE_KEY = "tradewinds.save.v3";
 
 const state = {
+  era: "sail",
   house: null,
   dest: null,
   voyage: null,
@@ -61,14 +64,14 @@ function renderTopbar() {
   $("stat-cash").textContent = money(h.cash);
   $("stat-hold").textContent = `${holdUsed(s)} / ${s.hold}`;
   $("stat-net").textContent = money(h.netWorth());
-  const d = dateOf(h.day);
+  const d = dateOf(h.day, h.eraId);
   $("stat-date").textContent = `${d.day} ${d.month.slice(0, 3)} ${d.year}`;
   $("stat-debt-wrap").hidden = h.debt <= 0;
   $("stat-debt").textContent = money(h.debt);
 
   $("ship-name").textContent = s.name;
   $("ship-type").textContent = `${s.rig} ${SHIPS.find((x) => x.id === s.type)?.name ?? ""}`;
-  $("ship-hold").textContent = `${s.hold} tuns`;
+  $("ship-hold").textContent = `${s.hold} ${h.era.unit}`;
   $("ship-speed").textContent = `${effectiveSpeed(s).toFixed(1)} kn`;
   $("ship-crew").textContent = s.crew;
   $("ship-cond").textContent = Math.round(s.condition * 100) + "%";
@@ -117,7 +120,7 @@ function renderMarket() {
   const tbody = $("market-rows");
   tbody.innerHTML = "";
 
-  for (const g of GOODS) {
+  for (const g of goodsFor(h.eraId)) {
     const open = h.goodOpen(g.id);
     const ask = m.ask(port, g.id);
     const bid = m.bid(port, g.id);
@@ -246,8 +249,8 @@ function renderDestPanel() {
   }
 
   const p = PORT[state.dest];
-  const leg = passage(h.location, state.dest, effectiveSpeed(h.ship));
-  const wages = Math.round(h.crewCount() * 0.55 * leg.days);
+  const leg = passage(h.location, state.dest, effectiveSpeed(h.ship), h.eraId);
+  const wages = Math.round(h.crewCount() * h.wageRate * leg.days);
 
   $("dest-title").textContent = p.name;
   $("dest-blurb").textContent = p.blurb;
@@ -290,7 +293,7 @@ function renderCommissions() {
   offers.innerHTML = "";
   if (!h.offers.length) offers.innerHTML = `<p class="empty">Nothing on the board today.</p>`;
   for (const o of h.offers) {
-    const leg = passage(h.location, o.to, effectiveSpeed(h.ship));
+    const leg = passage(h.location, o.to, effectiveSpeed(h.ship), h.eraId);
     const el = document.createElement("div");
     el.className = "card";
     el.innerHTML = `
@@ -328,7 +331,7 @@ function renderShipyard() {
 
   const hulls = $("hulls-list");
   hulls.innerHTML = "";
-  for (const t of SHIPS) {
+  for (const t of shipsFor(h.eraId)) {
     if (t.price <= 0) continue;
     const owned = h.fleet.filter((s) => s.type === t.id).length;
     const el = document.createElement("div");
@@ -350,7 +353,7 @@ function renderShipyard() {
   $("refit-ship").textContent = h.ship.name;
   const refits = $("refits-list");
   refits.innerHTML = "";
-  for (const u of UPGRADES) {
+  for (const u of upgradesFor(h.eraId)) {
     const fitted = h.ship.upgrades.includes(u.id);
     const el = document.createElement("div");
     el.className = "card" + (fitted ? " card-done" : "");
@@ -447,7 +450,7 @@ function startVoyage() {
   const destId = state.dest;
   if (!destId) return;
   const dest = PORT[destId];
-  const leg = passage(h.location, destId, effectiveSpeed(h.ship));
+  const leg = passage(h.location, destId, effectiveSpeed(h.ship), h.eraId);
 
   const windDeg = Math.floor(Math.random() * 360);
   const windKn = 8 + Math.floor(Math.random() * 18);
@@ -558,9 +561,32 @@ function bindHold(id, key) {
 
 /* ---------------------------------------------------------------- boot --- */
 
+function renderEraPicker() {
+  const box = $("era-picker");
+  if (!box) return;
+  box.innerHTML = "";
+  for (const e of ERAS) {
+    const el = document.createElement("button");
+    el.className = "era-card" + (e.id === state.era ? " sel" : "");
+    el.dataset.era = e.id;
+    el.innerHTML = `
+      <span class="era-year">${e.year}</span>
+      <span class="era-name">${e.name.replace("The Age of ", "")}</span>
+      <span class="era-tag">${e.tagline}</span>
+      <span class="era-stats"><span>${e.money}${e.startCash.toLocaleString()}</span><span>${e.unit}</span></span>`;
+    el.addEventListener("click", () => {
+      state.era = e.id;
+      renderEraPicker();
+      $("tagline").textContent = e.tagline;
+      $("era-blurb").textContent = e.blurb;
+    });
+    box.appendChild(el);
+  }
+}
+
 function newGame() {
   clearSave();
-  state.house = new House(Math.floor(Math.random() * 1e9));
+  state.house = new House(Math.floor(Math.random() * 1e9), state.era);
   state.dest = null;
   showTab("exchange");
   renderPort();
@@ -569,11 +595,13 @@ function newGame() {
 }
 
 function init() {
+  renderEraPicker();
   const saved = loadGame();
   if (saved) {
     $("continue-btn").hidden = false;
     $("continue-btn").addEventListener("click", () => {
       state.house = saved;
+      state.era = saved.eraId;
       showTab("exchange");
       renderPort();
       show("port-screen");

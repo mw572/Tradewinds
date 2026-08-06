@@ -8,6 +8,7 @@ import {
 import {
   GOODS, GOOD, PORTS, PORT, SHIPS, UPGRADE,
   distanceNm, passage, bearing, cardinal, chartXY, seasonOf, dateOf,
+  ERAS, goodsFor, shipsFor, upgradesFor, portProfile,
 } from "../src/world.js";
 
 const fails = [];
@@ -36,10 +37,21 @@ for (const p of PORTS) {
 }
 check(badRef.length === 0, "every produces/consumes entry names a real good" + (badRef.length ? ` (${badRef[0]})` : ""));
 
-let unproduced = GOODS.filter((g) => !PORTS.some((p) => p.produces?.[g.id]));
-check(unproduced.length === 0, "every good is produced somewhere" + (unproduced.length ? ` (missing ${unproduced.map(g=>g.id).join(",")})` : ""));
-let unwanted = GOODS.filter((g) => !PORTS.some((p) => p.consumes?.[g.id]));
-check(unwanted.length === 0, "every good is consumed somewhere" + (unwanted.length ? ` (missing ${unwanted.map(g=>g.id).join(",")})` : ""));
+// Checked per era: GOODS is the union across all three ages, so a sail-era
+// port profile has no opinion about container freight and should not be asked.
+for (const era of ERAS) {
+  const list = goodsFor(era.id);
+  const prof = Object.fromEntries(PORTS.map((p) => [p.id, portProfile(p.id, era.id)]));
+  const unproduced = list.filter((g) => !PORTS.some((p) => prof[p.id].produces[g.id]));
+  // The fuel good is exempt: it is burned by ships, not consumed by towns, so
+  // ports sell it and nobody buys it back.
+  const unwanted = list.filter((g) =>
+    g.id !== era.fuelGood && !PORTS.some((p) => prof[p.id].consumes[g.id]));
+  check(unproduced.length === 0, `${era.id}: every good is produced somewhere` +
+    (unproduced.length ? ` (missing ${unproduced.map((g) => g.id).join(",")})` : ""));
+  check(unwanted.length === 0, `${era.id}: every good is consumed somewhere` +
+    (unwanted.length ? ` (missing ${unwanted.map((g) => g.id).join(",")})` : ""));
+}
 
 let tierGap = PORTS.filter((p) => p.tier === 0).length;
 check(tierGap >= 6, `${tierGap} ports open at tier 0 (need a playable opening map)`);
@@ -345,6 +357,57 @@ const rng = makeRng(1);
 let lo = 1, hi = 0;
 for (let i = 0; i < 5000; i++) { const r = rng(); lo = Math.min(lo, r); hi = Math.max(hi, r); }
 check(lo >= 0 && hi < 1, `rng stays in [0,1) (${lo.toFixed(4)}..${hi.toFixed(4)})`);
+
+group("the three ages");
+
+for (const era of ERAS) {
+  const g = goodsFor(era.id), sh = shipsFor(era.id), up = upgradesFor(era.id);
+  check(g.length >= 12, `${era.id}: ${g.length} commodities`);
+  check(sh.length >= 3, `${era.id}: ${sh.length} hulls`);
+  check(up.length >= 3, `${era.id}: ${up.length} refits`);
+  check(sh[0].price === 0, `${era.id}: the starting hull is not for sale`);
+  check(g.every((x) => x.eras.includes(era.id)), `${era.id}: every listed good belongs to this age`);
+}
+
+const eraHouses = ERAS.map((e) => new House(31, e.id));
+for (const h of eraHouses) {
+  check(h.cash === h.era.startCash, `${h.eraId}: starts with its own stake (${h.era.money}${h.cash.toLocaleString()})`);
+  check(dateOf(h.day, h.eraId).year === h.era.startYear, `${h.eraId}: starts in ${h.era.startYear}`);
+  check(opportunities(h, 3).length > 0, `${h.eraId}: there is a profitable run on day one`);
+  check(h.tier === 0, `${h.eraId}: starts at tier 0`);
+}
+check(new Set(eraHouses.map((h) => h.ship.name)).size === 3, "each age names its ships differently");
+
+// Passages shorten across the ages, which is the whole point of the ships.
+const sailLeg = passage("lisbon", "recife", 7, "sail").days;
+const steamLeg = passage("lisbon", "recife", 9.5, "steam").days;
+const boxLeg = passage("lisbon", "recife", 18, "box").days;
+check(steamLeg < sailLeg, `steam beats sail to Brazil (${steamLeg}d vs ${sailLeg}d)`);
+check(boxLeg < steamLeg, `and the box beats steam (${boxLeg}d)`);
+
+// Bunkers: a powered ship burns fuel, a sailing ship does not.
+const steamer = new House(32, "steam");
+steamer.cash = 999999;
+steamer.buy("coal", 200);
+const coalBefore = steamer.ship.cargo.coal;
+steamer.completeVoyage("recife");
+check((steamer.ship.cargo.coal || 0) < coalBefore,
+  `a steamer burns her own bunkers (${coalBefore} -> ${steamer.ship.cargo.coal || 0})`);
+
+// Asserted on the rule, not on a voyage outcome: a storm can jettison cargo,
+// which would fail this check for a reason that has nothing to do with fuel.
+const sailer = new House(33, "sail");
+check(sailer.era.fuelGood === undefined, "a sailing ship has no bunkers to burn");
+check(ERAS.filter((e) => e.fuelGood).length === 2, "both powered ages do");
+
+// The save round-trips the era, not just the numbers.
+const boxHouse = new House(34, "box");
+boxHouse.buy("apparel", 3);
+const boxSave = JSON.parse(JSON.stringify(boxHouse.toJSON()));
+const boxBack = House.fromJSON(boxSave);
+check(boxBack.eraId === "box", "the era survives a save");
+check(boxBack.era.money === "$", "and brings its currency with it");
+check(House.fromJSON({ v: 2, eraId: "box" }).eraId === "sail", "an old save falls back to sail entirely");
 
 /* ------------------------------------------------------------ report ---- */
 console.log(`\n${count - fails.length}/${count} checks passed`);

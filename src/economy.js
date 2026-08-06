@@ -15,7 +15,10 @@
 // following days at the speed the port can actually produce. Nothing is faked
 // with a random walk.
 
-import { GOODS, GOOD, PORTS, PORT, SHIP, UPGRADE, passage, seasonOf } from "./world.js";
+import {
+  GOODS, GOOD, PORTS, PORT, SHIP, UPGRADE, passage, seasonOf,
+  goodsFor, shipsFor, upgradesFor, portProfile, ERA, ERA_NAMES,
+} from "./world.js";
 
 export { GOODS, GOOD, PORTS, PORT };
 
@@ -49,8 +52,15 @@ const MULT_MIN = 0.45, MULT_MAX = 2.6;
 const BACKGROUND_TRADE = 0.09;
 
 export class Market {
-  constructor(seed = 1620) {
+  constructor(seed = 1620, eraId = "sail") {
     this.rng = makeRng(seed);
+    this.eraId = eraId;
+    this.era = ERA[eraId] || ERA.sail;
+    this.goods = goodsFor(eraId);
+    // Port industry is resolved once. It never changes within a campaign, and
+    // recomputing it inside the daily tick was the obvious way to make the
+    // simulation twenty times slower than it needs to be.
+    this.prof = Object.fromEntries(PORTS.map((p) => [p.id, portProfile(p.id, eraId)]));
     this.day = 1;
     this.stock = {};    // stock[portId][goodId]
     this.target = {};   // target[portId][goodId]
@@ -61,15 +71,16 @@ export class Market {
       this.stock[p.id] = {};
       this.target[p.id] = {};
       this.history[p.id] = {};
-      for (const g of GOODS) {
-        const prod = p.produces?.[g.id] || 0;
-        const cons = p.consumes?.[g.id] || 0;
+      const prof = this.prof[p.id];
+      for (const g of this.goods) {
+        const prod = prof.produces[g.id] || 0;
+        const cons = prof.consumes[g.id] || 0;
         const throughput = Math.max(prod, cons, 2);
         this.target[p.id][g.id] = throughput * COVER_DAYS;
         this.history[p.id][g.id] = [];
       }
       // resting level needs target populated first
-      for (const g of GOODS) {
+      for (const g of this.goods) {
         const rest = this.restingStock(p.id, g.id);
         this.stock[p.id][g.id] = Math.max(1, rest * (0.88 + this.rng() * 0.24));
       }
@@ -81,9 +92,9 @@ export class Market {
 
   /** Where stock settles if nobody trades: production against consumption. */
   restingStock(portId, goodId) {
-    const p = PORT[portId];
-    const prod = p.produces?.[goodId] || 0;
-    const cons = p.consumes?.[goodId] || 0;
+    const prof = this.prof[portId];
+    const prod = prof.produces[goodId] || 0;
+    const cons = prof.consumes[goodId] || 0;
     const target = this.target[portId][goodId];
     if (prod === 0 && cons === 0) return target;
     // net + (target - rest) * BACKGROUND_TRADE = 0
@@ -126,6 +137,9 @@ export class Market {
     return sum / PORTS.length;
   }
 
+  /** Is this good traded at all in the current age? */
+  traded(goodId) { return this.target[PORTS[0].id][goodId] !== undefined; }
+
   /** Move stock. Positive adds to the warehouse, negative drains it. */
   moveStock(portId, goodId, qty) {
     const cap = this.target[portId][goodId] * 4;
@@ -157,8 +171,9 @@ export class Market {
     const p = PORTS[Math.floor(this.rng() * PORTS.length)];
     const kinds = ["glut", "shortage", "blockade", "fever", "boom"];
     const kind = kinds[Math.floor(this.rng() * kinds.length)];
-    const produced = Object.keys(p.produces || {});
-    const consumed = Object.keys(p.consumes || {});
+    const prof = this.prof[p.id];
+    const produced = Object.keys(prof.produces);
+    const consumed = Object.keys(prof.consumes);
 
     let ev = null;
     if (kind === "glut" && produced.length) {
@@ -219,9 +234,10 @@ export class Market {
       for (const p of PORTS) {
         const ev = this.events.filter((e) => e.port === p.id);
         const consumeFactor = ev.reduce((f, e) => f * (e.consumeFactor ?? 1), 1);
-        for (const g of GOODS) {
-          const prod = (p.produces?.[g.id] || 0) * this._seasonFactor(g.id);
-          const cons = (p.consumes?.[g.id] || 0) * consumeFactor;
+        const prof = this.prof[p.id];
+        for (const g of this.goods) {
+          const prod = (prof.produces[g.id] || 0) * this._seasonFactor(g.id);
+          const cons = (prof.consumes[g.id] || 0) * consumeFactor;
           const target = this.target[p.id][g.id];
           let s = this.stock[p.id][g.id];
           s += prod - cons;
@@ -237,7 +253,7 @@ export class Market {
       }
 
       for (const p of PORTS) {
-        for (const g of GOODS) {
+        for (const g of this.goods) {
           const h = this.history[p.id][g.id];
           h.push(this.spot(p.id, g.id));
           if (h.length > 40) h.shift();
@@ -292,19 +308,20 @@ export function effectiveSpeed(ship) {
 /* ------------------------------------------------------------- the house -- */
 
 export const START_CASH = 1400;
-const INTEREST_PER_DAY = 0.0016;   // roughly 63% a year. Lisbon is not kind.
-const WAGE_PER_CREW_DAY = 0.55;
 
 export class House {
-  constructor(seed = 1620) {
+  constructor(seed = 1620, eraId = "sail") {
     this.seed = seed;
-    this.market = new Market(seed);
+    this.eraId = eraId;
+    this.era = ERA[eraId] || ERA.sail;
+    this.market = new Market(seed, eraId);
     this.rng = makeRng(seed ^ 0x9e37);
-    this.cash = START_CASH;
+    this.cash = this.era.startCash;
     this.debt = 0;
     this.day = 1;
     this.location = "lisbon";
-    this.fleet = [makeShip("caravel", "Andorinha")];
+    const first = shipsFor(eraId)[0];
+    this.fleet = [makeShip(first.id, ERA_NAMES[eraId][0])];
     this.activeShip = 0;
     this.reputation = Object.fromEntries(PORTS.map((p) => [p.id, p.home ? 25 : 0]));
     this.contracts = [];
@@ -320,13 +337,17 @@ export class House {
   /** Standing: which ports and goods will deal with a house this size. */
   get tier() {
     const nw = this.netWorth();
-    if (nw >= 45000) return 2;
-    if (nw >= 9000) return 1;
+    const m = this.era.milestones;
+    if (nw >= m[3]) return 2;
+    if (nw >= m[1]) return 1;
     return 0;
   }
 
   portOpen(portId) { return PORT[portId].tier <= this.tier; }
-  goodOpen(goodId) { return GOOD[goodId].tier <= this.tier; }
+  goodOpen(goodId) {
+    const g = GOOD[goodId];
+    return !!g && g.eras.includes(this.eraId) && g.tier <= this.tier;
+  }
 
   netWorth() {
     let w = this.cash - this.debt;
@@ -338,7 +359,9 @@ export class House {
   }
 
   crewCount() { return this.fleet.reduce((n, s) => n + s.crew, 0); }
-  dailyCosts() { return Math.round(this.crewCount() * WAGE_PER_CREW_DAY + this.debt * INTEREST_PER_DAY); }
+  get wageRate() { return this.era.wagePerCrewDay; }
+  get interestRate() { return this.era.interestPerDay; }
+  dailyCosts() { return Math.round(this.crewCount() * this.wageRate + this.debt * this.interestRate); }
 
   say(text, kind = "info") {
     this.log.unshift({ day: this.day, text, kind });
@@ -498,7 +521,7 @@ export class House {
       if (!wanted.length) continue;
       const goodId = wanted[Math.floor(this.rng() * wanted.length)];
       const qty = 8 + Math.floor(this.rng() * 26);
-      const p = passage(this.location, dest.id, effectiveSpeed(this.ship));
+      const p = passage(this.location, dest.id, effectiveSpeed(this.ship), this.eraId);
       const marketValue = this.market.spot(dest.id, goodId) * qty;
       const reward = Math.round(marketValue * (1.18 + this.rng() * 0.32));
       this.offers.push({
@@ -552,14 +575,14 @@ export class House {
   /** Everything that happens between casting off and making fast. */
   completeVoyage(destId, opts = {}) {
     const s = this.ship;
-    const p = passage(this.location, destId, effectiveSpeed(s));
+    const p = passage(this.location, destId, effectiveSpeed(s), this.eraId);
     const days = opts.days ?? p.days;
     const before = this.netWorth();
 
-    const wages = Math.round(this.crewCount() * WAGE_PER_CREW_DAY * days);
+    const wages = Math.round(this.crewCount() * this.wageRate * days);
     this.cash -= wages;
     this.stats.wagesPaid += wages;
-    const interest = Math.round(this.debt * INTEREST_PER_DAY * days);
+    const interest = Math.round(this.debt * this.interestRate * days);
     this.debt += interest;
     this.stats.interestPaid += interest;
 
@@ -573,6 +596,27 @@ export class House {
         s.cost[g] = Math.max(0, (s.cost[g] || 0) - avgCost(s, g) * lost);
         if (s.cargo[g] <= 0) { delete s.cargo[g]; delete s.cost[g]; }
         spoiled.push(`${lost} x ${GOOD[g].name}`);
+      }
+    }
+
+    // Bunkers. A powered ship buys its own propulsion, and it comes out of the
+    // hold: the fuel good is bought at the port you left and burned at sea.
+    let fuelUsed = 0, fuelCost = 0;
+    if (this.era.fuelGood) {
+      const perDay = s.hold * this.era.fuelBurnPerDay * (s.fuelFactor ?? 1);
+      fuelUsed = Math.round(perDay * days);
+      const held = s.cargo[this.era.fuelGood] || 0;
+      const burned = Math.min(held, fuelUsed);
+      if (burned > 0) {
+        s.cargo[this.era.fuelGood] -= burned;
+        s.cost[this.era.fuelGood] = Math.max(0, (s.cost[this.era.fuelGood] || 0) - avgCost(s, this.era.fuelGood) * burned);
+        if (s.cargo[this.era.fuelGood] <= 0) { delete s.cargo[this.era.fuelGood]; delete s.cost[this.era.fuelGood]; }
+      }
+      // Short of bunkers you buy at sea, from whoever will sell, at a penalty.
+      const short = fuelUsed - burned;
+      if (short > 0) {
+        fuelCost = Math.round(short * GOOD[this.era.fuelGood].base * 1.85);
+        this.cash -= fuelCost;
       }
     }
 
@@ -590,7 +634,7 @@ export class House {
     const delta = after - before;
     if (delta > this.stats.bestVoyage) this.stats.bestVoyage = delta;
 
-    const notes = [`${days} days at sea. Wages £${wages.toLocaleString()}.`];
+    const notes = [`${days} days at sea. Wages ${this.era.money}${wages.toLocaleString()}.`];
     if (interest > 0) notes.push(`Interest £${interest.toLocaleString()}.`);
     if (spoiled.length) notes.push(`Spoiled in the hold: ${spoiled.join(", ")}.`);
     if (hazard) notes.push(hazard.note);
@@ -601,7 +645,7 @@ export class House {
 
   _rollHazard(days, nm) {
     const s = this.ship;
-    const risk = clamp((1 - s.seaworthy) * (0.55 + nm / 6000) * (1.35 - s.condition * 0.35), 0, 0.6);
+    const risk = clamp((1 - s.seaworthy) * (0.55 + nm / 6000) * (1.35 - s.condition * 0.35) * this.era.hazardScale, 0, 0.6);
     if (this.rng() > risk) return null;
 
     const kinds = s.armed ? ["storm", "storm", "calms"] : ["storm", "privateer", "calms"];
@@ -634,7 +678,7 @@ export class House {
     const extra = 2 + Math.floor(this.rng() * 5);
     this.day += extra;
     this.market.tick(extra);
-    const wages = Math.round(this.crewCount() * WAGE_PER_CREW_DAY * extra);
+    const wages = Math.round(this.crewCount() * this.wageRate * extra);
     this.cash -= wages;
     const note = `Becalmed for ${extra} days. £${wages.toLocaleString()} in wages for nothing.`;
     this.say(note, "bad");
@@ -643,13 +687,34 @@ export class House {
 
   _checkMilestones() {
     const nw = this.netWorth();
-    const marks = [
-      { at: 5000,   text: "£5,000. The house has a name on the Tagus." },
-      { at: 9000,   text: "£9,000. Antwerp and the Brazil run will deal with you now." },
-      { at: 20000,  text: "£20,000. Merchants who ignored you are sending letters." },
-      { at: 45000,  text: "£45,000. The Guinea coast is open to you, and so is its risk." },
-      { at: 100000, text: "£100,000. You are one of the great houses of the Atlantic." },
-    ];
+    const TEXT = {
+      sail: [
+        "The house has a name on the Tagus.",
+        "Antwerp and the Brazil run will deal with you now.",
+        "Merchants who ignored you are sending letters.",
+        "The Guinea coast is open to you, and so is its risk.",
+        "You are one of the great houses of the Atlantic.",
+      ],
+      steam: [
+        "You own your bunkers outright. No more coaling on credit.",
+        "The brokers put your name on the fixture list.",
+        "A second hull, and a clerk to keep the books.",
+        "You are quoting rates rather than accepting them.",
+        "A line, not a tramp. Sailings advertised in advance.",
+      ],
+      box: [
+        "The first ship is paid down. The slots are yours.",
+        "Shippers ring you before they ring the conference.",
+        "You hold a berth window at two terminals.",
+        "Your schedule is published and people plan around it.",
+        "You are one of the lines. Everyone quotes against you.",
+      ],
+    };
+    const lines = TEXT[this.eraId] || TEXT.sail;
+    const sym = this.era.money;
+    const marks = this.era.milestones.map((at, i) => ({
+      at, text: `${sym}${at.toLocaleString()}. ${lines[i]}`,
+    }));
     for (const m of marks) {
       if (nw >= m.at && !this.milestones.includes(m.at)) {
         this.milestones.push(m.at);
@@ -669,7 +734,7 @@ export class House {
 
   toJSON() {
     return {
-      v: 2, seed: this.seed, cash: this.cash, debt: this.debt, day: this.day, location: this.location,
+      v: 3, seed: this.seed, eraId: this.eraId, cash: this.cash, debt: this.debt, day: this.day, location: this.location,
       fleet: this.fleet, activeShip: this.activeShip, reputation: this.reputation,
       contracts: this.contracts, offers: this.offers, milestones: this.milestones,
       stats: this.stats, log: this.log.slice(0, 20),
@@ -678,8 +743,8 @@ export class House {
   }
 
   static fromJSON(data) {
-    const h = new House(data?.seed ?? 1620);
-    if (!data || data.v !== 2) return h;
+    if (!data || data.v !== 3) return new House(1620, "sail");
+    const h = new House(data.seed ?? 1620, data.eraId ?? "sail");
     Object.assign(h, {
       cash: data.cash, debt: data.debt, day: data.day, location: data.location,
       fleet: data.fleet, activeShip: data.activeShip, reputation: data.reputation,
@@ -721,14 +786,14 @@ export function opportunities(house, limit = 6) {
   const out = [];
   for (const p of PORTS) {
     if (p.id === from || !house.portOpen(p.id) || m.isBlockaded(p.id)) continue;
-    const leg = passage(from, p.id, effectiveSpeed(s));
-    for (const g of GOODS) {
+    const leg = passage(from, p.id, effectiveSpeed(s), house.eraId);
+    for (const g of m.goods) {
       if (!house.goodOpen(g.id)) continue;
       const qty = house.maxBuy(g.id);
       if (qty < 1) continue;
       const outlay = estimateRealised(m, from, g.id, qty, "buy");
       const revenue = estimateRealised(m, p.id, g.id, qty, "sell");
-      const wages = house.crewCount() * WAGE_PER_CREW_DAY * leg.days;
+      const wages = house.crewCount() * house.wageRate * leg.days;
       const net = revenue - outlay - wages;
       if (net <= 0) continue;
       out.push({

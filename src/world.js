@@ -2,6 +2,10 @@
 // Pure data + pure functions. No DOM, no Three.js, so the test harness can
 // import this straight into node.
 
+import { ERAS, ERA, ERA_GOODS, LATER_GOODS, ERA_PORTS, ERA_SHIPS, ERA_UPGRADES, ERA_NAMES } from "./eras.js";
+
+export { ERAS, ERA, ERA_NAMES };
+
 /* ============================ COMMODITIES ============================
  * base      — fair price in £ per tun at an average port
  * bulk      — tuns of hold consumed per unit (most goods 1; timber is bulky)
@@ -27,7 +31,23 @@ export const GOODS = [
   { id: "gold",     name: "Gold Dust",     base: 520, bulk: 0.5, vol: 0.70, perish: 0,      tier: 2, note: "Elmina. Half a tun to the unit, and worth a ship." },
 ];
 
+// The sail-era goods above are the original list; the later ages append theirs.
+GOODS.push(...LATER_GOODS);
+
+// A good can belong to more than one age — salt, timber and cloth are traded in
+// all three — so membership is a set derived from ERA_GOODS rather than a single
+// `era` field. ERA_GOODS is the one place that decides what is traded when.
+for (const g of GOODS) {
+  g.eras = Object.entries(ERA_GOODS).filter(([, ids]) => ids.includes(g.id)).map(([e]) => e);
+  if (!g.eras.length) g.eras = [g.era || "sail"];
+}
+
 export const GOOD = Object.fromEntries(GOODS.map((g) => [g.id, g]));
+
+/** The commodities traded in a given age, in the order they should be listed. */
+export function goodsFor(eraId) {
+  return (ERA_GOODS[eraId] || []).map((id) => GOOD[id]).filter(Boolean);
+}
 
 /* ================================ PORTS ================================
  * lat/lon    — real positions, so the chart and the sailing legs are honest
@@ -173,7 +193,13 @@ export const SHIPS = [
   { id: "galleon", name: "Galleon", hold: 220, speedKn: 6.8,  crew: 52, price: 24000, rig: "Square",      masts: 4, seaworthy: 0.93,
     note: "Armed, heavy and safe. Nothing on the Atlantic troubles her." },
 ];
+for (const t of SHIPS) if (!t.era) t.era = "sail";
+SHIPS.push(...(ERA_SHIPS.steam || []), ...(ERA_SHIPS.box || []));
+
 export const SHIP = Object.fromEntries(SHIPS.map((s) => [s.id, s]));
+
+/** Hulls available in a given age. The first is the one you start with. */
+export function shipsFor(eraId) { return SHIPS.filter((s) => s.era === eraId); }
 
 /* Hull, rig and hold upgrades. Each applies once per ship. */
 export const UPGRADES = [
@@ -186,7 +212,42 @@ export const UPGRADES = [
   { id: "guns",      name: "Ship's guns",      price: 3400, note: "Twelve six-pounders. Privateers look elsewhere.",
     apply: (s) => { s.seaworthy = Math.min(0.98, s.seaworthy + 0.10); s.armed = true; s.speedKn *= 0.97; } },
 ];
+for (const u of UPGRADES) if (!u.era) u.era = "sail";
+for (const [eid, list] of Object.entries(ERA_UPGRADES)) {
+  for (const u of list) { u.era = eid; UPGRADES.push(u); }
+}
+
 export const UPGRADE = Object.fromEntries(UPGRADES.map((u) => [u.id, u]));
+
+/** Refits offered in a given age. */
+export function upgradesFor(eraId) { return UPGRADES.filter((u) => u.era === eraId); }
+
+/**
+ * What a port makes and wants in a given age. Sail uses the profile written on
+ * the port itself; later ages override it. A port with no entry for an age
+ * still trades, on a light general-cargo profile, so nowhere is dead.
+ */
+export function portProfile(portId, eraId) {
+  const p = PORT[portId];
+  if (eraId === "sail") return { produces: p.produces || {}, consumes: p.consumes || {} };
+  const override = ERA_PORTS[eraId]?.[portId];
+  if (override) {
+    // Strip anything not traded this era, so a typo cannot smuggle in a good.
+    const keep = new Set(ERA_GOODS[eraId]);
+    const filt = (o) => Object.fromEntries(Object.entries(o || {}).filter(([k, v]) => keep.has(k) && v > 0));
+    return { produces: filt(override.produces), consumes: filt(override.consumes) };
+  }
+  const list = ERA_GOODS[eraId] || [];
+  const produces = {}, consumes = {};
+  // Deterministic fallback keyed on the port id, so it is stable run to run.
+  let h = 0;
+  for (let i = 0; i < portId.length; i++) h = (h * 31 + portId.charCodeAt(i)) >>> 0;
+  list.forEach((g, i) => {
+    if ((h >> (i % 24)) & 1) produces[g] = 6 + (i % 5) * 2;
+    else consumes[g] = 6 + (i % 4) * 2;
+  });
+  return { produces, consumes };
+}
 
 /* =============================== GEOGRAPHY =============================== */
 
@@ -217,7 +278,7 @@ export function bearing(fromId, toId) {
  * calms, foul winds and reefing cost you. 62% of hull speed is a fair average,
  * and the trade winds give a bonus on the southbound Atlantic runs.
  */
-export function passage(fromId, toId, shipSpeedKn) {
+export function passage(fromId, toId, shipSpeedKn, eraId = "sail") {
   const nm = distanceNm(fromId, toId);
   const a = PORT[fromId], b = PORT[toId];
   // Trade winds: westward and southward passages in the tropics run faster.
@@ -227,10 +288,14 @@ export function passage(fromId, toId, shipSpeedKn) {
   let windFactor = 1.0;
   if (tropical && southing > 5 && westing > 0) windFactor = 1.18;   // running down the trades
   else if (tropical && southing < -5 && westing < 0) windFactor = 0.88; // beating home against them
-  const knots = shipSpeedKn * 0.62 * windFactor;
-  // Plus a day warping out, working the tide and clearing the customs house.
+  const era = ERA[eraId] || ERA.sail;
+  // Trade winds only help a ship that is using them.
+  const wf = era.propulsion === "wind" ? windFactor : 1;
+  const knots = shipSpeedKn * era.speedFactor * wf;
+  // Plus turnaround: warping out, working the tide, clearing the customs house.
   // Without it, short hops like Lisbon to Porto become a grindable loop.
-  const days = Math.max(2, Math.round(nm / (knots * 24)) + 1);
+  const days = Math.max(era.turnaroundDays + 1,
+    Math.round(nm / (knots * 24)) + era.turnaroundDays);
   return { nm: Math.round(nm), days, bearing: Math.round((bearing(fromId, toId) + 360) % 360) };
 }
 
@@ -256,10 +321,10 @@ export const SEASONS = ["Spring", "Summer", "Autumn", "Winter"];
 export function seasonOf(day) {
   return SEASONS[Math.floor((((day - 1) % 360) / 90)) % 4];
 }
-export function dateOf(day) {
+export function dateOf(day, eraId = "sail") {
   const MONTHS = ["March", "April", "May", "June", "July", "August",
     "September", "October", "November", "December", "January", "February"];
   const d = (day - 1) % 360;
-  const year = 1620 + Math.floor((day - 1) / 360);
+  const year = (ERA[eraId] || ERA.sail).startYear + Math.floor((day - 1) / 360);
   return { day: (d % 30) + 1, month: MONTHS[Math.floor(d / 30)], year };
 }

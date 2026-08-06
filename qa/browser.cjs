@@ -47,6 +47,53 @@ const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name) });
   check((await page.textContent('.game-title')).trim() === 'TRADEWINDS', 'the title reads TRADEWINDS');
   check(jsErrors.length === 0, 'no JS errors on load' + (jsErrors.length ? `: ${jsErrors[0]}` : ''));
 
+  group('the three ages');
+  const eraCards = await page.locator('#era-picker .era-card').count();
+  check(eraCards === 3, `three ages are offered (${eraCards})`);
+  check(await page.locator('#era-picker .era-card.sel').count() === 1, 'one is selected');
+
+  // Play a Steam campaign far enough to prove the whole stack is era-driven.
+  await page.locator('#era-picker .era-card[data-era="steam"]').click();
+  await page.waitForTimeout(120);
+  await page.click('#start-btn');
+  await page.waitForSelector('#port-screen.active', { timeout: 6000 });
+  await page.waitForTimeout(400);
+  const steamDate = await page.textContent('#stat-date');
+  check(/1880/.test(steamDate), `Steam starts in 1880 (${steamDate})`);
+  const steamCash = await page.textContent('#stat-cash');
+  check(/9,000/.test(steamCash), `with its own stake (${steamCash})`);
+  const steamGoods = await page.locator('#market-rows tr').allTextContents();
+  check(steamGoods.some((t) => /Steam Coal/.test(t)), 'coal is on the exchange');
+  check(!steamGoods.some((t) => /Port Wine/.test(t)), 'and the sail-era goods are not');
+  check(/tons/.test(await page.textContent('#ship-hold')), 'the hold is measured in tons');
+  await page.click('.tab[data-tab="shipyard"]');
+  await page.waitForTimeout(200);
+  const steamHulls = await page.textContent('#hulls-list');
+  check(/Tramp Steamer/.test(steamHulls), 'steamers are for sale');
+  await shot(page, '11-steam-era.png');
+
+  // And a Box campaign, which uses a different currency entirely.
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(300);
+  await page.locator('#era-picker .era-card[data-era="box"]').click();
+  await page.waitForTimeout(120);
+  await page.click('#start-btn');
+  await page.waitForSelector('#port-screen.active', { timeout: 6000 });
+  await page.waitForTimeout(400);
+  const boxCash = await page.textContent('#stat-cash');
+  check(/^\$/.test(boxCash.trim()), `the Box age trades in dollars (${boxCash})`);
+  check(/1985/.test(await page.textContent('#stat-date')), 'and starts in 1985');
+  check(/TEU/.test(await page.textContent('#ship-hold')), 'the hold is measured in TEU');
+  const boxGoods = await page.locator('#market-rows tr').allTextContents();
+  check(boxGoods.some((t) => /Electronics/.test(t)), 'boxed cargo is on the exchange');
+  await shot(page, '12-box-era.png');
+
+  // Back to Sail for the rest of the run.
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(300);
+  await page.locator('#era-picker .era-card[data-era="sail"]').click();
+  await page.waitForTimeout(120);
+
   group('the docks');
   await page.click('#start-btn');
   await page.waitForSelector('#port-screen.active', { timeout: 5000 });
