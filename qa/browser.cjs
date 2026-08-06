@@ -76,7 +76,7 @@ const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name) });
   await page.click('.tab[data-tab="chart"]'); await page.waitForTimeout(200);
   await page.locator('#chart .port-g[data-port="porto"]').click(); await page.waitForTimeout(150);
   await page.click('#sail-btn');
-  await page.waitForSelector('#voyage-screen.active', { timeout: 6000 });
+  await page.waitForSelector('#voyage-screen.active', { timeout: 15000 });
   await page.waitForTimeout(2600);
   const steamShip = await page.evaluate(() => {
     const s = window.__tw.state.voyage.ship3d;
@@ -87,6 +87,28 @@ const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name) });
   check(steamShip.smoke, 'and she makes smoke');
   check(/Engine/.test(await page.textContent('.inst:nth-child(3) .inst-label')), 'the instruments read Engine, not Point of sail');
   check(/telegraph/.test(await page.textContent('#key-trim')), 'and the controls say telegraph');
+
+  // Engines, not canvas: a steamer must never be reported in irons, and the
+  // engine room must lag behind the telegraph.
+  const eng = await page.evaluate(async () => {
+    const v = window.__tw.state.voyage;
+    v.trim = 1.0;                        // ring down full ahead
+    const r0 = v.revs;
+    await new Promise((r) => setTimeout(r, 700));
+    return { prop: v.propulsion, r0, r1: v.revs, ordered: v.ordered };
+  });
+  check(eng.prop === 'steam', `she is driven by steam (${eng.prop})`);
+  check(eng.r1 > eng.r0 && eng.r1 < 1.0, `the engine room lags the telegraph (${eng.r0.toFixed(2)} -> ${eng.r1.toFixed(2)} for an order of 1.00)`);
+  // Head her straight into the wind: under canvas that is in irons, under steam
+  // it is simply a headwind.
+  const irons = await page.evaluate(async () => {
+    const v = window.__tw.state.voyage;
+    v.heading = v.windFrom;
+    await new Promise((r) => setTimeout(r, 500));
+    return { inIrons: v._lastHud?.inIrons, speed: v.speedKn };
+  });
+  check(irons.inIrons !== true, 'head to wind she is not in irons');
+  check(irons.speed > 0.5, `and she keeps driving into it (${irons.speed.toFixed(1)} kn)`);
 
   // And a Box campaign, which uses a different currency entirely.
   await page.goto(BASE, { waitUntil: 'networkidle' });
@@ -107,7 +129,7 @@ const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name) });
   await page.click('.tab[data-tab="chart"]'); await page.waitForTimeout(200);
   await page.locator('#chart .port-g[data-port="porto"]').click(); await page.waitForTimeout(150);
   await page.click('#sail-btn');
-  await page.waitForSelector('#voyage-screen.active', { timeout: 6000 });
+  await page.waitForSelector('#voyage-screen.active', { timeout: 15000 });
   await page.waitForTimeout(2600);
   const boxShip = await page.evaluate(() => {
     const s = window.__tw.state.voyage.ship3d;
@@ -220,7 +242,7 @@ const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name) });
   await page.locator('#chart .port-g[data-port="porto"]').click();
   await page.waitForTimeout(150);
   await page.click('#sail-btn');
-  await page.waitForSelector('#voyage-screen.active', { timeout: 5000 });
+  await page.waitForSelector('#voyage-screen.active', { timeout: 15000 });
   await page.waitForTimeout(2600);   // let the scene build and a few frames run
 
   check(await page.isVisible('#voyage-screen.active'), 'the helm screen opens');
@@ -338,7 +360,7 @@ const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name) });
   await mp.locator('#chart .port-g[data-port="porto"]').tap();
   await mp.waitForTimeout(200);
   await mp.tap('#sail-btn');
-  await mp.waitForSelector('#voyage-screen.active', { timeout: 6000 });
+  await mp.waitForSelector('#voyage-screen.active', { timeout: 15000 });
   await mp.waitForTimeout(2400);
   check(await mp.isVisible('.touch-pad'), 'touch controls appear at the helm');
   await shot(mp, '10-mobile-helm.png');

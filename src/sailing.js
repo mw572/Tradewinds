@@ -146,7 +146,6 @@ export class Voyage {
 
     if (this.harbour) { this.scene.remove(this.harbour.group); this.harbour.dispose(); }
     this.berth = new THREE.Vector3(0, 0, 0);
-    this.berthRadius = 26;
 
     // The quay runs alongshore and the land sits to one side of it. That
     // orientation has to be fixed per port and independent of the weather:
@@ -155,7 +154,9 @@ export class Voyage {
     let hash = 0;
     for (let i = 0; i < opts.port.id.length; i++) hash = (hash * 31 + opts.port.id.charCodeAt(i)) >>> 0;
     this.berthHeading = (hash % 360);
-    this.harbour = new Harbour(opts.port, this.berth, this.berthHeading, this.berthRadius);
+    const eraId = opts.shipSpec?.era || "sail";
+    const berthR = eraId === "box" ? 44 : eraId === "steam" ? 34 : 26;
+    this.harbour = new Harbour(opts.port, this.berth, this.berthHeading, berthR, eraId);
     this.scene.add(this.harbour.group);
 
     // Seaward is the opposite of the direction the harbour builds its land in.
@@ -180,6 +181,20 @@ export class Voyage {
     this.pitchAngle = 0;
     this.pitchVel = 0;
     this.maxKn = Math.max(3, opts.shipSpec?.speedKn ?? 7);
+    this.era = opts.shipSpec?.era || "sail";
+    this.propulsion = { sail: "wind", steam: "steam", box: "diesel" }[this.era];
+
+    // Engine state. `ordered` is what the bridge rang down; `revs` is what the
+    // engine room has actually worked up to. The gap between them is the whole
+    // character of handling a powered ship.
+    this.ordered = 0.55;
+    this.revs = 0.35;
+    this.astern = false;
+
+    // A big ship needs a big berth, and carries her way for much longer.
+    const lenScale = (opts.shipSpec?.type && this.era !== "sail") ? 1.0 : 1.0;
+    this.berthRadius = this.era === "box" ? 44 : this.era === "steam" ? 34 : 26;
+    if (this.harbour) this.harbour.setBerthRadius?.(this.berthRadius);
 
     // Always start well out to sea, offset along the shore so the run in is a
     // reach rather than a straight line at the quay.
@@ -253,7 +268,9 @@ export class Voyage {
     if (this.dockable) { this.arrived = true; this.onArrive?.({ clean: true }); return; }
     const dist = Math.hypot(this.pos.x - this.berth.x, this.pos.z - this.berth.z);
     let why = "Not close enough to the berth yet.";
-    if (dist < this.berthRadius && this.speedKn >= 1.4) why = "Too much way on. Spill the wind and come in slow.";
+    if (dist < this.berthRadius && !this._slowEnough) why = this.propulsion === "wind"
+      ? "Too much way on. Spill the wind and come in slow."
+      : "Too much way on. Ring for astern and take it off her.";
     else if (dist < this.berthRadius) why = "Square her up with the berth before you make fast.";
     this.opts?.onMessage?.(why);
   }
@@ -284,22 +301,48 @@ export class Voyage {
     this.windFrom = (this.opts.windDeg + g2 * 7 + 360) % 360;
 
     const twa = angleDiff(this.heading, this.windFrom);
-    const power = sailPower(twa);
     const windScale = clamp(this.windKn / 14, 0.45, 1.7);
-    const targetKn = this.trim * this.maxKn * power * windScale;
+    let power, targetKn, steerAuth, leeway;
 
-    // She builds way slowly and loses it fast. That asymmetry is the game.
-    const accel = targetKn > this.speedKn ? 0.55 : 1.5;
-    this.speedKn += (targetKn - this.speedKn) * clamp(dt * accel, 0, 1);
+    if (this.propulsion === "wind") {
+      // Canvas. Nothing drives her but the wind, and the rudder needs water
+      // flowing past it.
+      power = sailPower(twa);
+      targetKn = this.trim * this.maxKn * power * windScale;
+      const accel = targetKn > this.speedKn ? 0.55 : 1.5;
+      this.speedKn += (targetKn - this.speedKn) * clamp(dt * accel, 0, 1);
+      steerAuth = 0.2 + this.speedKn / (this.maxKn * 0.5);
+      leeway = (1 - power) * this.trim * 0.5 + 0.06;
+    } else {
+      // Engines. `trim` is now the telegraph, and the engine room takes time to
+      // answer it: a reciprocating steam plant is slow to work up and slower to
+      // come astern, a big diesel is quicker to order but the ship behind it
+      // has vastly more inertia to shift.
+      const STEAM = this.propulsion === "steam";
+      this.ordered = this.trim;
+      const answer = STEAM ? 0.55 : 1.1;                    // revs per second toward the order
+      this.revs += (this.ordered - this.revs) * clamp(dt * answer, 0, 1);
+
+      power = 1;
+      targetKn = this.revs * this.maxKn;
+      // Displacement is the point. A loaded boxship takes minutes to stop.
+      const build = STEAM ? 0.30 : 0.16;
+      const shed = STEAM ? 0.24 : 0.11;
+      const rate = targetKn > this.speedKn ? build : shed;
+      this.speedKn += (targetKn - this.speedKn) * clamp(dt * rate, 0, 1);
+
+      // A screw pushes water over the rudder, so she answers her helm even at
+      // dead slow — but a long hull is far less willing to turn.
+      const wash = 0.34 + this.revs * 0.5;
+      const lever = STEAM ? 0.85 : 0.55;
+      steerAuth = (wash + this.speedKn / (this.maxKn * 0.8)) * lever;
+
+      // Wind no longer drives her, but a high-sided ship still sets to leeward.
+      leeway = (STEAM ? 0.10 : 0.16) * windScale;
+    }
     this.speedKn = Math.max(0, this.speedKn);
-
-    // The rudder needs water past it: stalled, she barely answers her helm.
-    // The 0.2 floor is deliberate. With no floor a ship caught head-to-wind can
-    // never turn out of it, because turning needs speed and speed needs turning,
-    // and the voyage becomes unwinnable. Sweeps and a backed sail would get her
-    // round in reality; this is the cheap stand-in for that.
-    const steerAuth = clamp(0.2 + this.speedKn / (this.maxKn * 0.5), 0, 1.15);
-    this.heading = (this.heading + this.rudder * 40 * steerAuth * dt + 360) % 360;
+    this.heading = (this.heading + this.rudder * (this.era === "box" ? 24 : this.era === "steam" ? 32 : 40)
+      * clamp(steerAuth, 0, 1.15) * dt + 360) % 360;
 
     const hRad = this.heading * DEG;
     const fwd = new THREE.Vector3(Math.sin(hRad), 0, -Math.cos(hRad));
@@ -307,8 +350,6 @@ export class Voyage {
     const windVec = new THREE.Vector3(-Math.sin(wRad), 0, Math.cos(wRad));
     const WORLD_PER_KN = 7.5;
     this.pos.addScaledVector(fwd, this.speedKn * WORLD_PER_KN * dt);
-    // Leeway: a badly-drawing sail pushes her sideways instead of forwards.
-    const leeway = (1 - power) * this.trim * 0.5 + 0.06;
     this.pos.addScaledVector(windVec, leeway * WORLD_PER_KN * dt * windScale);
 
     // Ground her rather than letting her sail through the coast. The terrain
@@ -367,8 +408,11 @@ export class Voyage {
     // wind. A hull has mass and a righting moment: she leans INTO a gust over a
     // second or so, hangs there, and rolls back upright when it eases. Setting
     // the angle directly made her snap between attitudes like a hinge.
-    const heelSign = Math.sin((this.heading - this.windFrom) * DEG);
-    const heelTarget = -roll * 0.72 + heelSign * this.trim * power * 0.30 * windScale;
+    // Under canvas she heels to the wind; under power she heels into her turn,
+    // which is the opposite direction and a completely different feel.
+    const heelTarget = this.propulsion === "wind"
+      ? -roll * 0.72 + Math.sin((this.heading - this.windFrom) * DEG) * this.trim * power * 0.30 * windScale
+      : -roll * 0.62 - this.rudder * (this.speedKn / this.maxKn) * 0.16;
     const STIFF = 26, DAMP = 6.4;        // righting moment, and the water's drag on it
     this.heelVel += (heelTarget - this.heelAngle) * STIFF * dt - this.heelVel * DAMP * dt;
     this.heelAngle += this.heelVel * dt;
@@ -411,15 +455,16 @@ export class Voyage {
     this.harbour.update(this.t, night);
 
     const aligned = angleDiff(this.heading, this.berthHeading) < 60;
-    const slow = this.speedKn < 1.4;
+    const slow = this.speedKn < (this.era === "box" ? 2.2 : this.era === "steam" ? 1.8 : 1.4);
     const inside = dist < this.berthRadius;
+    this._slowEnough = slow;
     this.dockable = inside && slow && aligned && !this.arrived;
     this.harbour.setDockable(this.dockable);
     this.onDockableCb?.(this.dockable, { inside, slow, aligned });
 
     this._camera(dt, fwd, g, speedFrac);
 
-    this.onHud?.({
+    this._lastHud = {
       headingDeg: Math.round(this.heading),
       speedKn: this.speedKn,
       maxKn: this.maxKn,
@@ -432,10 +477,13 @@ export class Voyage {
       windKn: this.windKn,
       gust: this.gust,
       heelDeg: Math.round((this.heelAngle * 180) / Math.PI),
-      inIrons: twa < 30,
+      inIrons: this.propulsion === "wind" && twa < 30,
+      revs: this.revs,
+      propulsion: this.propulsion,
       dockable: this.dockable,
       night,
-    });
+    };
+    this.onHud?.(this._lastHud);
   }
 
   _camera(dt, fwd, g, speedFrac) {

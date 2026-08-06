@@ -182,6 +182,12 @@ const FRAG = /* glsl */ `
   }
 
   void main() {
+    // The ocean plane is 9000 units across and follows the ship, so it runs
+    // straight over the coast behind the shoreline and drew sea on top of the
+    // town. Nothing beyond the beach is water; throw those fragments away.
+    float shoreT = dot(vWorld.xz, uShoreDir);
+    if (shoreT > uShoreAt + 6.0) discard;
+
     vec3 N = normalize(vNormal);
     vec3 V = normalize(uCam - vWorld);
     vec3 L = normalize(uSun);
@@ -202,8 +208,7 @@ const FRAG = /* glsl */ `
     // Shoaling: as the bottom comes up the water goes from deep blue through
     // turquoise to pale sand. This is the thing that makes a coast read as a
     // coast rather than a green cut-out standing in a blue plane.
-    float toShore = dot(vWorld.xz, uShoreDir);
-    float depth = clamp((uShoreAt - toShore) / 420.0, 0.0, 1.0);
+    float depth = clamp((uShoreAt - shoreT) / 420.0, 0.0, 1.0);
     float shoal = 1.0 - smoothstep(0.0, 0.62, depth);
     body = mix(body, uShoal, shoal * 0.86);
 
@@ -212,7 +217,7 @@ const FRAG = /* glsl */ `
     vec3 col = mix(body, reflected, fres * 0.82);
 
     // Surf: a band of broken water where the swell feels the bottom.
-    float surf = smoothstep(0.82, 0.99, shoal) * (0.55 + 0.45 * sin(uTime2 * 1.6 + toShore * 0.06));
+    float surf = smoothstep(0.82, 0.99, shoal) * (0.55 + 0.45 * sin(uTime2 * 1.6 + shoreT * 0.06));
     col = mix(col, vec3(0.94, 0.97, 0.97), clamp(surf, 0.0, 1.0) * 0.7);
 
     // Sun glitter. Two lobes: a tight specular and a broad sheen.

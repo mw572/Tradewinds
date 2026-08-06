@@ -31,7 +31,8 @@ export class Harbour {
    * @param headingDeg the berth's orientation, so the pier runs alongside it
    * @param berthRadius the green ring the ship must be inside
    */
-  constructor(port, berthPos, headingDeg, berthRadius) {
+  constructor(port, berthPos, headingDeg, berthRadius, eraId = "sail") {
+    this.eraId = eraId;
     const spec = port.berth || { scale: 1, style: "city", lighthouse: false, moored: 2 };
     const pal = PALETTES[spec.style] || PALETTES.city;
     const rnd = rngFrom(port.id);
@@ -50,6 +51,17 @@ export class Harbour {
       roof:  new THREE.MeshStandardMaterial({ color: pal.roof, roughness: 0.9 }),
       wood:  new THREE.MeshStandardMaterial({ color: 0x6b4a2c, roughness: 0.92 }),
       walls: pal.wall.map((c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.94 })),
+      concrete: new THREE.MeshStandardMaterial({ color: 0x9a9a95, roughness: 0.96 }),
+      rubber:   new THREE.MeshStandardMaterial({ color: 0x25262a, roughness: 0.97 }),
+      brick:    new THREE.MeshStandardMaterial({ color: 0x8a4a38, roughness: 0.95 }),
+      slate:    new THREE.MeshStandardMaterial({ color: 0x4d5058, roughness: 0.9 }),
+      wagon:    new THREE.MeshStandardMaterial({ color: 0x3a3128, roughness: 0.95 }),
+      steelTrim:new THREE.MeshStandardMaterial({ color: 0x6e7379, roughness: 0.6, metalness: 0.45 }),
+      gantry:   new THREE.MeshStandardMaterial({ color: 0xcfd3d6, roughness: 0.62, metalness: 0.2 }),
+      craneRed: new THREE.MeshStandardMaterial({ color: 0xc23a2c, roughness: 0.68 }),
+      white:    new THREE.MeshStandardMaterial({ color: 0xe6e6e2, roughness: 0.7 }),
+      yardBox:  new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.78 }),
+      paint:    new THREE.MeshStandardMaterial({ color: 0xd9d2a8, roughness: 0.9 }),
     };
     this.mat = mat;
 
@@ -103,7 +115,23 @@ export class Harbour {
       // Carve the basin: pull everything down near the berth so there is water
       // to manoeuvre in, and a shelving bottom rather than a cliff.
       const distBerth = Math.hypot(a, o);
-      h -= Math.max(0, 1 - distBerth / 190) * 62;
+      const basinR = eraId === "box" ? 230 : eraId === "steam" ? 205 : 190;
+      // Only seaward. Dredging a basin does not lower the hills behind the
+      // town, and applying it inland put the whole coast under water.
+      const inland = Math.min(1, Math.max(0, d / 55));
+      h -= Math.max(0, 1 - distBerth / basinR) * 62 * (1 - inland);
+      // The powered eras lay a concrete apron over this, so the ground beneath
+      // only has to stay below it rather than be shaped for it.
+      if (eraId !== "sail") {
+        // Feathered, not a hard rectangle. A step change here left a black
+        // cliff where the reclaimed ground met the natural coast.
+        const apronTo = eraId === "box" ? 250 : 160;
+        const halfW = eraId === "box" ? 235 : 160;
+        const fx = 1 - Math.min(1, Math.max(0, (Math.abs(a) - halfW * 0.86) / (halfW * 0.22)));
+        const fo = 1 - Math.min(1, Math.max(0, (o - apronTo * 0.86) / (apronTo * 0.22)));
+        const k = Math.min(fx, fo);
+        if (k > 0) h = h * (1 - k) + Math.min(h, -2.5) * k;
+      }
       return h * S;
     };
     this.groundAt = groundAt;
@@ -121,19 +149,37 @@ export class Harbour {
     };
     const tmpC = new THREE.Color();
 
-    // The plane's local +x runs along the berth and +z runs offshore; the mesh
-    // is rotated into place afterwards, so the height function reads directly.
+    // Built straight into world space from the same (along, offshore) basis
+    // that at() uses. It used to be a plane rotated by hRad — which is NOT the
+    // rotation that maps onto the fwd/side basis — so the ground and everything
+    // standing on it were in different frames, and the quay ended up on a
+    // hillside a hundred metres inland.
+    const heights = new Float32Array(tp.count);
+    const alongs = new Float32Array(tp.count);
     for (let i = 0; i < tp.count; i++) {
-      const lx = tp.getX(i), lz = tp.getZ(i);
-      const off = lz + TERRAIN_SIZE / 2;
-      const h = groundAt(lx, off);
-      tp.setY(i, h);
+      const along = tp.getX(i);
+      const off = tp.getZ(i) + TERRAIN_SIZE / 2;
+      const h = groundAt(along, off);
+      heights[i] = h;
+      alongs[i] = along;
+      const w = at(along, off, h);
+      tp.setXYZ(i, w.x, w.y, w.z);
+    }
+    // (fwd, up, side) is left-handed — side is -(fwd x up), because the harbour
+    // needs +offshore to point at the land. Mapping the plane through it
+    // reverses every triangle, so the winding has to be reversed back or the
+    // whole coast lights from underneath and renders black.
+    const tIdx = tGeo.getIndex();
+    if (tIdx) {
+      const a = tIdx.array;
+      for (let i = 0; i < a.length; i += 3) { const t = a[i + 1]; a[i + 1] = a[i + 2]; a[i + 2] = t; }
+      tIdx.needsUpdate = true;
     }
     tGeo.computeVertexNormals();
 
     const tn = tGeo.attributes.normal;
     for (let i = 0; i < tp.count; i++) {
-      const h = tp.getY(i) / S;
+      const h = heights[i] / S;
       const slope = 1 - Math.abs(tn.getY(i));
       if (h < -1.0) tmpC.copy(CG.wet);
       else if (h < 1.6) tmpC.copy(CG.wet).lerp(CG.sand, (h + 1.0) / 2.6);
@@ -143,7 +189,7 @@ export class Harbour {
       else tmpC.copy(CG.dry).lerp(CG.rock, Math.min(1, (h - 68) / 45));
       if (slope > 0.42) tmpC.lerp(CG.rock, Math.min(1, (slope - 0.42) * 2.2));
       // Break up the flat fill so a hillside is not one colour.
-      const j = 0.94 + fbm(tp.getX(i) * 0.05, tp.getZ(i) * 0.05) * 0.14;
+      const j = 0.94 + fbm(alongs[i] * 0.05, heights[i] * 0.05) * 0.14;
       colors[i * 3] = tmpC.r * j;
       colors[i * 3 + 1] = tmpC.g * j;
       colors[i * 3 + 2] = tmpC.b * j;
@@ -153,46 +199,260 @@ export class Harbour {
     const terrain = new THREE.Mesh(tGeo, new THREE.MeshStandardMaterial({
       vertexColors: true, roughness: 0.97, metalness: 0, flatShading: false,
     }));
-    terrain.position.copy(at(0, TERRAIN_SIZE / 2, 0));
-    terrain.rotation.y = hRad;
     terrain.receiveShadow = true;
     terrain.castShadow = true;
     this.group.add(terrain);
 
-    /* ------------------------------ the pier ------------------------------ */
-    const pier = new THREE.Mesh(new THREE.BoxGeometry(11 * S, 7 * S, 88 * S), mat.stone);
-    pier.position.copy(at(0, 10 * S, 1.4 * S));
+    /* ----------------------------- the berth -----------------------------
+     * What stands on the quay is entirely an era question. A 1620 stone mole
+     * with bollards and a hand crane, an 1880 coaling berth with staithes and
+     * rail sidings, and a 1985 container terminal with quay gantries are not
+     * variations on a theme; they share only the water in front of them. */
+    const quayLen = eraId === "box" ? 260 * S : eraId === "steam" ? 150 * S : 88 * S;
+    const quayW = eraId === "sail" ? 11 * S : 26 * S;
+    const quayMat = eraId === "sail" ? mat.stone : mat.concrete;
+
+    if (eraId !== "sail") {
+      // The apron. Terminals and coaling berths stand on made ground: a flat
+      // concrete slab from the quay face back to the yard. Recolouring the
+      // terrain instead left the gantries standing on grass.
+      const apronD = eraId === "box" ? 260 * S : 170 * S;
+      const apronW = eraId === "box" ? 470 * S : 320 * S;
+      const apron = new THREE.Mesh(
+        new THREE.BoxGeometry(apronW, 60 * S, apronD), mat.concrete);
+      // Deep, so the slab's own sides are below the water rather than on show.
+      apron.position.copy(at(0, 4 * S + apronD / 2, 8 * S - 30 * S));
+      apron.rotation.y = hRad;
+      apron.receiveShadow = true;
+      this.group.add(apron);
+
+      // Painted lane markings, so the scale of the yard reads.
+      for (let i = -3; i <= 3; i++) {
+        const lane = new THREE.Mesh(
+          new THREE.BoxGeometry(0.7 * S, 0.1 * S, apronD * 0.8), mat.paint);
+        lane.position.copy(at(i * 52 * S, 4 * S + apronD / 2, 8.05 * S));
+        lane.rotation.y = hRad;
+        this.group.add(lane);
+      }
+    }
+
+    const pier = new THREE.Mesh(new THREE.BoxGeometry(quayW, 8 * S, quayLen), quayMat);
+    pier.position.copy(at(0, (quayW / 2 + 4 * S) / S * S, 1.6 * S));
     pier.rotation.y = hRad;
     pier.castShadow = true; pier.receiveShadow = true;
     this.group.add(pier);
+    const quayEdge = quayW / 2 + 4 * S;   // offshore distance of the quay face
 
-    // Steps down to the water
-    for (let i = 0; i < 4; i++) {
-      const step = new THREE.Mesh(new THREE.BoxGeometry(3.4 * S, 0.6 * S, 9 * S), mat.stone);
-      step.position.copy(at(-6 * S, (5.4 - i * 0.7) * S, (3.4 - i * 0.85) * S));
-      step.rotation.y = hRad;
-      this.group.add(step);
+    // Fenders down the quay face, so a hull has something to lie against.
+    for (let a = -quayLen * 0.45; a <= quayLen * 0.45; a += 11 * S) {
+      const f = new THREE.Mesh(
+        eraId === "sail"
+          ? new THREE.CylinderGeometry(0.6 * S, 0.6 * S, 3.4 * S, 7)
+          : new THREE.CylinderGeometry(1.0 * S, 1.0 * S, 2.2 * S, 10),
+        eraId === "sail" ? mat.wood : mat.rubber);
+      if (eraId !== "sail") f.rotation.z = Math.PI / 2;
+      f.position.copy(at(a, quayEdge - quayW / 2 - 0.5 * S, 2.4 * S));
+      this.group.add(f);
     }
 
-    // Bollards
-    for (const a of [-26, -9, 9, 26]) {
-      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.8 * S, 1.05 * S, 5.4 * S, 8), mat.stone);
-      post.position.copy(at(a * S, 5.2 * S, 3.4 * S));
-      post.castShadow = true;
-      this.group.add(post);
-    }
+    if (eraId === "sail") {
+      for (let i = 0; i < 4; i++) {
+        const step = new THREE.Mesh(new THREE.BoxGeometry(3.4 * S, 0.6 * S, 9 * S), mat.stone);
+        step.position.copy(at(-6 * S, (5.4 - i * 0.7) * S, (3.4 - i * 0.85) * S));
+        step.rotation.y = hRad;
+        this.group.add(step);
+      }
+      for (const a of [-26, -9, 9, 26]) {
+        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.8 * S, 1.05 * S, 5.4 * S, 8), mat.stone);
+        post.position.copy(at(a * S, quayEdge - quayW * 0.3, 5.2 * S));
+        post.castShadow = true;
+        this.group.add(post);
+      }
+      const craneBase = new THREE.Mesh(new THREE.CylinderGeometry(1.5 * S, 2.0 * S, 9 * S, 8), mat.wood);
+      craneBase.position.copy(at(30 * S, quayEdge + 2 * S, 12 * S));
+      this.group.add(craneBase);
+      const jib = new THREE.Mesh(new THREE.BoxGeometry(1.0 * S, 1.0 * S, 16 * S), mat.wood);
+      jib.position.copy(at(30 * S, quayEdge - 4 * S, 12 * S));
+      jib.rotation.set(0.5, hRad, 0);
+      this.group.add(jib);
 
-    // A crane on the quay
-    const craneBase = new THREE.Mesh(new THREE.CylinderGeometry(1.5 * S, 2.0 * S, 9 * S, 8), mat.wood);
-    craneBase.position.copy(at(30 * S, 12 * S, 5 * S));
-    this.group.add(craneBase);
-    const jib = new THREE.Mesh(new THREE.BoxGeometry(1.0 * S, 1.0 * S, 16 * S), mat.wood);
-    jib.position.copy(at(30 * S, 12 * S, 11 * S));
-    jib.rotation.set(0.5, hRad, 0);
-    this.group.add(jib);
+    } else if (eraId === "steam") {
+      /* ---- coaling staithes: the whole point of an 1880 berth ---- */
+      for (const a of [-46, 0, 46]) {
+        // Elevated timber trestle carrying the wagon road out over the ships.
+        const deckH = 16 * S;
+        const trestle = new THREE.Mesh(
+          new THREE.BoxGeometry(9 * S, 1.6 * S, 26 * S), mat.wood);
+        trestle.position.copy(at(a * S, quayEdge + 4 * S, deckH));
+        trestle.rotation.y = hRad;
+        trestle.castShadow = true;
+        this.group.add(trestle);
+        for (const dz of [-10, 0, 10]) {
+          for (const dx of [-3.6, 3.6]) {
+            const leg = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.55 * S, 0.7 * S, deckH, 6), mat.wood);
+            leg.position.copy(at((a + dz) * S, quayEdge + 4 * S + dx * S, deckH / 2));
+            this.group.add(leg);
+          }
+        }
+        // The chute that drops coal into a hold.
+        const chute = new THREE.Mesh(new THREE.BoxGeometry(3.2 * S, 9 * S, 2.4 * S), mat.wood);
+        chute.position.copy(at(a * S, quayEdge - quayW * 0.45, deckH - 4 * S));
+        chute.rotation.set(0, hRad, 0.42);
+        chute.castShadow = true;
+        this.group.add(chute);
+        // A coal wagon on the trestle.
+        const wagon = new THREE.Mesh(new THREE.BoxGeometry(4.4 * S, 3.0 * S, 6.5 * S), mat.wagon);
+        wagon.position.copy(at((a - 6) * S, quayEdge + 4 * S, deckH + 2.3 * S));
+        wagon.rotation.y = hRad;
+        wagon.castShadow = true;
+        this.group.add(wagon);
+      }
+
+      // Rail sidings running along behind the quay.
+      for (const off of [0, 6]) {
+        for (const railX of [-1.4, 1.4]) {
+          const rail = new THREE.Mesh(
+            new THREE.BoxGeometry(0.3 * S, 0.28 * S, quayLen * 0.95), mat.steelTrim);
+          rail.position.copy(at(0, quayEdge + 22 * S + off * S, 8.2 * S));
+          rail.rotation.y = hRad;
+          rail.translateX(railX * S);
+          this.group.add(rail);
+        }
+      }
+
+      // Steam cranes and a brick goods shed.
+      for (const a of [-72, 72]) {
+        const base = new THREE.Mesh(new THREE.BoxGeometry(4 * S, 5 * S, 4 * S), mat.brick);
+        base.position.copy(at(a * S, quayEdge + 6 * S, 10.5 * S));
+        base.castShadow = true;
+        this.group.add(base);
+        const jib = new THREE.Mesh(new THREE.BoxGeometry(0.9 * S, 0.9 * S, 15 * S), mat.steelTrim);
+        jib.position.copy(at(a * S, quayEdge - 4 * S, 15 * S));
+        jib.rotation.set(0.55, hRad, 0);
+        this.group.add(jib);
+      }
+      const shed = new THREE.Mesh(
+        new THREE.BoxGeometry(quayLen * 0.5, 14 * S, 26 * S), mat.brick);
+      shed.position.copy(at(0, quayEdge + 46 * S, 15 * S));
+      shed.rotation.y = hRad;
+      shed.castShadow = true;
+      this.group.add(shed);
+      const shedRoof = new THREE.Mesh(
+        new THREE.CylinderGeometry(14 * S, 14 * S, quayLen * 0.5, 3), mat.slate);
+      shedRoof.rotateZ(Math.PI / 2);
+      shedRoof.scale.set(1, 1, 0.55);
+      shedRoof.position.copy(at(0, quayEdge + 46 * S, 24 * S));
+      shedRoof.rotation.y = hRad;
+      this.group.add(shedRoof);
+
+    } else {
+      /* ---- container terminal: gantries, a stacked yard, no town at all ---- */
+      const RAIL_OUT = quayEdge - quayW * 0.32, RAIL_IN = quayEdge + quayW * 0.40;
+      for (const r of [RAIL_OUT, RAIL_IN]) {
+        const rail = new THREE.Mesh(
+          new THREE.BoxGeometry(1.2 * S, 0.5 * S, quayLen * 0.98), mat.steelTrim);
+        rail.position.copy(at(0, r, 8.3 * S));
+        rail.rotation.y = hRad;
+        this.group.add(rail);
+      }
+
+      // Quay gantries. Portal legs, a boom reaching out over the ship, and a
+      // backreach over the yard: the silhouette of every container port there is.
+      for (const a of [-86, -18, 52, 116]) {
+        const H = 62 * S;
+        for (const [ox, oz] of [[RAIL_OUT, -7], [RAIL_OUT, 7], [RAIL_IN, -7], [RAIL_IN, 7]]) {
+          const leg = new THREE.Mesh(new THREE.BoxGeometry(3.0 * S, H, 3.0 * S), mat.gantry);
+          leg.position.copy(at((a + oz) * S, ox, H / 2 + 8 * S));
+          leg.castShadow = true;
+          this.group.add(leg);
+        }
+        const portal = new THREE.Mesh(
+          new THREE.BoxGeometry(20 * S, 4 * S, 34 * S), mat.gantry);
+        portal.position.copy(at(a * S, (RAIL_OUT + RAIL_IN) / 2, H + 9 * S));
+        portal.rotation.y = hRad;
+        portal.castShadow = true;
+        this.group.add(portal);
+        // The boom, out over the water where the ship lies.
+        const boom = new THREE.Mesh(new THREE.BoxGeometry(5 * S, 3.2 * S, 96 * S), mat.gantry);
+        boom.position.copy(at(a * S, quayEdge - 26 * S, H + 14 * S));
+        boom.rotation.y = hRad + Math.PI / 2;
+        boom.castShadow = true;
+        this.group.add(boom);
+        const house = new THREE.Mesh(new THREE.BoxGeometry(4 * S, 3.4 * S, 4 * S), mat.white);
+        house.position.copy(at(a * S, quayEdge - 8 * S, H + 7 * S));
+        this.group.add(house);
+      }
+
+      // The yard: blocks of stacked boxes behind the quay.
+      const yardGeo = new THREE.BoxGeometry(6.0 * S, 2.6 * S, 12.5 * S);
+      const YCOUNT = 420;
+      const yard = new THREE.InstancedMesh(yardGeo, mat.yardBox, YCOUNT);
+      yard.castShadow = true; yard.receiveShadow = true;
+      const LIV = [0xa5352b, 0x2b5fa5, 0xb5892c, 0x2f7a4f, 0x8d8d92, 0xc4622d];
+      const m4 = new THREE.Matrix4(), qq = new THREE.Quaternion(), sc3 = new THREE.Vector3(1, 1, 1);
+      const cc = new THREE.Color();
+      let n = 0;
+      for (let blk = 0; blk < 5 && n < YCOUNT; blk++) {
+        const blockOff = quayEdge + 34 * S + blk * 34 * S;
+        for (let row = 0; row < 7 && n < YCOUNT; row++) {
+          for (let tier = 0; tier < 4 && n < YCOUNT; tier++) {
+            if (rnd() < 0.22) continue;
+            const along = (row - 3) * 13.2 * S + (blk % 2) * 3 * S;
+            m4.compose(at(along, blockOff, 9.3 * S + tier * 2.7 * S),
+              qq.setFromAxisAngle(new THREE.Vector3(0, 1, 0), hRad), sc3);
+            yard.setMatrixAt(n, m4);
+            yard.setColorAt(n, cc.setHex(LIV[Math.floor(rnd() * LIV.length)]));
+            n++;
+          }
+        }
+      }
+      yard.count = n;
+      yard.instanceMatrix.needsUpdate = true;
+      if (yard.instanceColor) yard.instanceColor.needsUpdate = true;
+      this.group.add(yard);
+
+      // Straddle carriers moving between the stacks.
+      for (let i = 0; i < 5; i++) {
+        const sc = new THREE.Group();
+        for (const dx of [-3.4, 3.4]) {
+          for (const dz of [-5, 5]) {
+            const leg = new THREE.Mesh(new THREE.BoxGeometry(0.8 * S, 13 * S, 0.8 * S), mat.craneRed);
+            leg.position.set(dx * S, 6.5 * S, dz * S);
+            sc.add(leg);
+          }
+        }
+        const top = new THREE.Mesh(new THREE.BoxGeometry(8 * S, 1.6 * S, 12 * S), mat.craneRed);
+        top.position.y = 13.5 * S;
+        sc.add(top);
+        sc.position.copy(at((rnd() - 0.5) * 190 * S, quayEdge + (28 + rnd() * 130) * S, 8.4 * S));
+        sc.rotation.y = hRad + (rnd() < 0.5 ? 0 : Math.PI / 2);
+        sc.castShadow = true;
+        this.group.add(sc);
+      }
+
+      // Floodlight masts.
+      for (const a of [-120, 0, 120]) {
+        const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.5 * S, 0.9 * S, 40 * S, 6), mat.steelTrim);
+        mast.position.copy(at(a * S, quayEdge + 150 * S, 28 * S));
+        this.group.add(mast);
+        const head = new THREE.Mesh(new THREE.BoxGeometry(6 * S, 1.4 * S, 2 * S), mat.white);
+        head.position.copy(at(a * S, quayEdge + 150 * S, 48 * S));
+        head.rotation.y = hRad;
+        this.group.add(head);
+        const lamp = new THREE.PointLight(0xd8e4ff, 0, 240 * S, 2);
+        lamp.position.copy(at(a * S, quayEdge + 150 * S, 47 * S));
+        this.group.add(lamp);
+        this.lights.push({ light: lamp, peak: 4.5 });
+      }
+    }
 
     /* ---------------------------- the town ---------------------------- */
-    const count = { city: 78, river: 62, fortress: 46, island: 30, kasbah: 54, reef: 40 }[spec.style] || 46;
+    // A container terminal is built away from the town it serves, so the berth
+    // has cranes and a yard rather than streets. The town is still there, but
+    // it is small and far back.
+    const townScale = eraId === "box" ? 0.28 : 1;
+    const count = Math.round(({ city: 78, river: 62, fortress: 46, island: 30, kasbah: 54, reef: 40 }[spec.style] || 46) * townScale);
     for (let i = 0; i < count; i++) {
       const w = (9 + rnd() * 13) * S;
       const d = (9 + rnd() * 12) * S;
@@ -200,7 +460,7 @@ export class Harbour {
       const h = (7 + storeys * 4.5) * S;
 
       const along = (rnd() - 0.5) * 300 * S;
-      const off = (78 + rnd() * 260) * S;
+      const off = ((eraId === "box" ? 300 : eraId === "steam" ? 210 : 78) + rnd() * 260) * S;
       const ground = groundAt(along, off);
       if (ground < 1.5 * S) continue;      // do not build below the tide line
 
@@ -268,7 +528,7 @@ export class Harbour {
       let placed = 0;
       for (let i = 0; i < TREES * 4 && placed < TREES; i++) {
         const along = (rnd() - 0.5) * 620 * S;
-        const off = (70 + rnd() * 380) * S;
+        const off = ((eraId === "sail" ? 70 : 250) + rnd() * 380) * S;
         const g = groundAt(along, off);
         if (g < 4 * S) continue;                    // not on the beach
         const near = Math.hypot(along / S, off / S);
