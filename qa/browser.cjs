@@ -96,10 +96,14 @@ const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name) });
   await page.click('.tab[data-tab="chart"]');
   await page.waitForTimeout(250);
   check(await page.isVisible('#chart'), 'the chart renders');
-  const portDots = await page.locator('#chart .port-dot').count();
+  // Scoped to .port-g: the legend reuses the same dot classes as swatches.
+  const portDots = await page.locator('#chart .port-g .port-dot').count();
   check(portDots >= 15, `every port is plotted (${portDots})`);
-  check(await page.locator('#chart .port-dot.here').count() === 1, 'your position is marked');
-  check(await page.locator('#chart .chart-land').count() >= 4, 'coastlines are drawn');
+  check(await page.locator('#chart .port-g .port-dot.here').count() === 1, 'your position is marked');
+  const coastPaths = await page.locator('#chart .coast path').count();
+  check(coastPaths >= 100, `real coastlines are drawn (${coastPaths} paths)`);
+  check(await page.locator('#chart .rhumbs line').count() > 80, 'the rhumb network is struck');
+  check(await page.locator('#chart .cartouche').count() === 1, 'the cartouche is inked');
   await page.locator('#chart .port-g[data-port="porto"]').click();
   await page.waitForTimeout(200);
   check((await page.textContent('#dest-title')).trim() === 'Porto', 'clicking a port sets the course');

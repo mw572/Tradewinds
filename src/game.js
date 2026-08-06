@@ -6,9 +6,10 @@ import {
 } from "./economy.js";
 import {
   GOODS, GOOD, PORTS, PORT, SHIPS, UPGRADES,
-  passage, chartXY, cardinal, dateOf, seasonOf,
+  passage, cardinal, dateOf, seasonOf,
 } from "./world.js";
 import { Voyage } from "./sailing.js";
+import { drawChart as renderChart } from "./chart.js";
 
 const $ = (id) => document.getElementById(id);
 const money = (n) => "£" + Math.round(n).toLocaleString();
@@ -216,89 +217,11 @@ function renderOps() {
 
 /* --------------------------------------------------------------- chart --- */
 
-const CHART_W = 600, CHART_H = 780;
-
-function chartPoint(p) {
-  const c = chartXY(p.lat, p.lon);
-  return { x: 26 + c.x * (CHART_W - 52), y: 22 + c.y * (CHART_H - 44) };
-}
-
-// Rough coastlines in lon/lat, projected at draw time. Enough to read the
-// Atlantic at a glance; this is a chart table, not an atlas.
-const LANDS = [
-  [[-9.5,43.8],[-8.9,41.9],[-9.5,38.7],[-8.9,37.0],[-6.3,36.0],[-5.3,36.1],[-4.4,36.7],[-2.1,36.7],[0.9,38.0],[3.2,41.9],[4.9,43.4],[7.6,43.8],[7.6,49.0],[4.3,51.5],[2.0,51.1],[-1.5,50.6],[-5.7,50.1],[-3.0,53.4],[-4.7,54.9],[-2.0,57.6],[-3.0,58.7],[-6.2,58.5],[-5.6,55.9],[-8.0,54.5],[-10.5,51.5],[-6.0,49.9],[-1.8,46.3],[-1.3,44.5],[-9.5,43.8]],
-  [[-10.4,51.5],[-6.0,51.9],[-5.9,54.7],[-8.2,55.3],[-10.2,54.2],[-10.4,51.5]],
-  [[-9.8,32.0],[-6.0,35.9],[-2.2,35.3],[3.1,36.8],[10.2,37.3],[11.6,33.2],[11.5,23.0],[-5.0,20.0],[-17.1,21.0],[-16.5,26.0],[-13.0,27.7],[-9.8,32.0]],
-  [[-17.1,21.0],[-16.0,16.5],[-13.6,9.5],[-11.5,7.4],[-7.5,4.4],[-3.0,5.1],[1.2,6.1],[3.4,6.4],[8.5,4.3],[9.7,3.9],[9.4,0.4],[11.8,-3.9],[13.0,-8.0],[12.0,-13.0],[11.7,-18.0],[8.0,-18.0],[8.0,-6.0],[5.0,0.0],[-2.0,3.0],[-9.0,3.5],[-14.0,10.0],[-17.5,14.7],[-17.1,21.0]],
-  [[-52.0,4.9],[-48.5,-1.4],[-44.3,-2.5],[-38.5,-3.7],[-34.8,-7.1],[-35.2,-9.6],[-37.0,-11.0],[-38.5,-13.0],[-39.0,-18.0],[-46.0,-18.0],[-46.0,4.9],[-52.0,4.9]],
-];
-
 function drawChart() {
   const h = state.house;
   if (!h) return;
   const svg = $("chart");
-  const here = PORT[h.location];
-  const parts = [];
-
-  parts.push(`<defs>
-    <radialGradient id="vignette" cx="50%" cy="45%" r="72%">
-      <stop offset="58%" stop-color="rgba(0,0,0,0)"/>
-      <stop offset="100%" stop-color="rgba(24,14,4,0.40)"/>
-    </radialGradient>
-  </defs>`);
-  parts.push(`<rect x="0" y="0" width="${CHART_W}" height="${CHART_H}" class="chart-sea"/>`);
-
-  for (let lon = -40; lon <= 10; lon += 10) {
-    const a = chartPoint({ lat: 56, lon }), b = chartPoint({ lat: -18, lon });
-    parts.push(`<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" class="grat"/>`);
-    parts.push(`<text x="${a.x}" y="14" class="grat-label" text-anchor="middle">${Math.abs(lon)}&deg;${lon < 0 ? "W" : "E"}</text>`);
-  }
-  for (let lat = -10; lat <= 50; lat += 10) {
-    const a = chartPoint({ lat, lon: -46 }), b = chartPoint({ lat, lon: 12 });
-    parts.push(`<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" class="grat"/>`);
-    parts.push(`<text x="4" y="${a.y + 3}" class="grat-label">${Math.abs(lat)}&deg;${lat < 0 ? "S" : "N"}</text>`);
-  }
-
-  for (const poly of LANDS) {
-    const d = poly.map(([lon, lat], i) => {
-      const q = chartPoint({ lat, lon });
-      return `${i ? "L" : "M"}${q.x.toFixed(1)},${q.y.toFixed(1)}`;
-    }).join(" ") + " Z";
-    parts.push(`<path d="${d}" class="chart-land"/>`);
-  }
-
-  const rose = chartPoint({ lat: -6, lon: -22 });
-  parts.push(`<g class="rose" transform="translate(${rose.x},${rose.y})">
-    <circle r="32" class="rose-ring"/><circle r="21" class="rose-ring"/>
-    ${[0, 45, 90, 135, 180, 225, 270, 315].map((a) => {
-      const r = a % 90 === 0 ? 31 : 22;
-      const rad = ((a - 90) * Math.PI) / 180;
-      return `<line x1="0" y1="0" x2="${(Math.cos(rad) * r).toFixed(1)}" y2="${(Math.sin(rad) * r).toFixed(1)}" class="rose-spoke"/>`;
-    }).join("")}
-    <text y="-35" class="rose-n" text-anchor="middle">N</text></g>`);
-
-  if (state.dest && state.dest !== h.location) {
-    const a = chartPoint(here), b = chartPoint(PORT[state.dest]);
-    parts.push(`<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" class="course"/>`);
-    const leg = passage(h.location, state.dest, effectiveSpeed(h.ship));
-    parts.push(`<text x="${(a.x + b.x) / 2}" y="${(a.y + b.y) / 2 - 8}" class="course-label" text-anchor="middle">${leg.nm.toLocaleString()} nm &middot; ${leg.days} days</text>`);
-  }
-
-  for (const p of PORTS) {
-    const q = chartPoint(p);
-    const open = h.portOpen(p.id);
-    const isHere = p.id === h.location;
-    const cls = ["port-dot", isHere ? "here" : "", p.id === state.dest ? "dest" : "",
-      open ? "" : "shut", h.market.isBlockaded(p.id) ? "blockaded" : ""].filter(Boolean).join(" ");
-    parts.push(`<g class="port-g ${open && !isHere ? "clickable" : ""}" data-port="${p.id}">
-      <circle cx="${q.x}" cy="${q.y}" r="15" class="port-hit"/>
-      <circle cx="${q.x}" cy="${q.y}" r="${isHere ? 6.5 : 4.5}" class="${cls}"/>
-      <text x="${q.x + 9}" y="${q.y + 4}" class="port-label ${open ? "" : "shut"}">${p.name}</text></g>`);
-  }
-
-  parts.push(`<rect x="0" y="0" width="${CHART_W}" height="${CHART_H}" fill="url(#vignette)" pointer-events="none"/>`);
-
-  svg.innerHTML = parts.join("");
+  renderChart(svg, h, state.dest);
   svg.querySelectorAll(".port-g.clickable").forEach((g) => {
     g.addEventListener("click", () => {
       state.dest = g.dataset.port;

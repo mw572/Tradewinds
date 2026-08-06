@@ -79,6 +79,7 @@ const VERT = /* glsl */ `
   uniform float uSteep[5];
   uniform vec2  uDir[5];
   uniform vec3  uWake[8];      // xz = world position, z-slot = age 0..1
+  uniform float uWindAmp;      // 0.45 in a calm .. 1.6 in a gale
 
   varying vec3  vWorld;
   varying vec3  vNormal;
@@ -99,8 +100,8 @@ const VERT = /* glsl */ `
       vec2  d = uDir[i];
       float ph = dot(d, base) * k + uTime * uPhaseSpeed[i] * k;
       float c = cos(ph), s = sin(ph);
-      float q = uSteep[i] / (k * uAmp[i] * 5.0);
-      float a = uAmp[i];
+      float a = uAmp[i] * uWindAmp;
+      float q = uSteep[i] / (k * a * 5.0);
 
       disp.x += q * a * d.x * c;
       disp.z += q * a * d.y * c;
@@ -156,11 +157,23 @@ const FRAG = /* glsl */ `
   uniform vec3  uHorizon;
   uniform float uFogNear;
   uniform float uFogFar;
+  uniform vec2  uWindDir;      // unit vector the wind blows TOWARDS
+  uniform float uWindStr;      // 0 calm .. 1 hard
+  uniform float uTime2;
 
   varying vec3  vWorld;
   varying vec3  vNormal;
   varying float vFoam;
   varying float vHeight;
+
+  // Cheap value noise. Two octaves is plenty for wind texture on water.
+  float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  float vnoise(vec2 p){
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1,0)), u.x),
+               mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), u.x), u.y);
+  }
 
   void main() {
     vec3 N = normalize(vNormal);
@@ -189,6 +202,17 @@ const FRAG = /* glsl */ `
     float ndh = clamp(dot(N, H), 0.0, 1.0);
     col += uSunColor * pow(ndh, 420.0) * 1.5;
     col += uSunColor * pow(ndh, 28.0) * 0.16;
+
+    // Cat's paws: the dark ruffled patches wind drags across water. Stretched
+    // along the wind axis and scrolled downwind, they are the single clearest
+    // signal on screen that the air is moving and which way.
+    vec2 windPerp = vec2(-uWindDir.y, uWindDir.x);
+    vec2 wp = vec2(dot(vWorld.xz, uWindDir), dot(vWorld.xz, windPerp));
+    vec2 streakUV = vec2(wp.x * 0.0055 - uTime2 * 0.42, wp.y * 0.030);
+    float paw = vnoise(streakUV) * 0.65 + vnoise(streakUV * 2.7 + 11.0) * 0.35;
+    paw = smoothstep(0.48, 0.86, paw) * uWindStr;
+    col *= 1.0 - paw * 0.30;                       // ruffled water is darker
+    col += uSunColor * paw * 0.05;                 // and glitters a little more
 
     // Foam sits on top of everything, slightly blue in shadow.
     vec3 foamCol = mix(vec3(0.72, 0.80, 0.83), vec3(1.0), clamp(dot(N, L), 0.0, 1.0));
@@ -246,6 +270,10 @@ export class Ocean {
       uHorizon:    { value: new THREE.Color(0xa8c2c4) },
       uFogNear:    { value: 1500 },
       uFogFar:     { value: 4200 },
+      uWindAmp:    { value: 1 },
+      uWindDir:    { value: new THREE.Vector2(1, 0) },
+      uWindStr:    { value: 0.5 },
+      uTime2:      { value: 0 },
     };
 
     this.mesh = new THREE.Mesh(geo, new THREE.ShaderMaterial({
@@ -272,9 +300,18 @@ export class Ocean {
    * uCenter keeps the wave field locked to world space. Without this the waves
    * would appear to travel with the ship and she would never seem to move.
    */
-  update(t, shipPos, camera, palette) {
+  update(t, shipPos, camera, palette, wind) {
     this._t = t;
     this.uniforms.uTime.value = t;
+    this.uniforms.uTime2.value = t;
+    if (wind) {
+      // Wave height follows the wind, but not linearly: a sea takes time to get
+      // up, so the exponent keeps a fresh breeze from looking like a storm.
+      this.uniforms.uWindAmp.value = 0.45 + Math.pow(Math.min(wind.kn, 34) / 22, 1.35) * 1.05;
+      const r = (wind.fromDeg + 180) * Math.PI / 180;
+      this.uniforms.uWindDir.value.set(Math.sin(r), -Math.cos(r));
+      this.uniforms.uWindStr.value = Math.min(1, Math.max(0, (wind.kn - 4) / 22));
+    }
     this.mesh.position.set(shipPos.x, 0, shipPos.z);
     this.uniforms.uCenter.value.set(shipPos.x, shipPos.z);
     this.uniforms.uCam.value.copy(camera.position);

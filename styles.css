@@ -317,31 +317,39 @@ html, body {
 
 /* -------------------------------------------------------------- chart ---- */
 
-.chart-panel { display: flex; flex-direction: column; }
+.chart-panel { display: flex; flex-direction: column; padding: 10px; }
 .chart-wrap { flex: 1 1 auto; min-height: 0; display: flex; }
-#chart { width: 100%; height: 100%; max-height: 100%; }
+#chart { width: 100%; height: 100%; max-height: 100%; border-radius: 4px; }
 
-.chart-sea { fill: var(--sea-chart); }
-.chart-land { fill: #6d6144; stroke: #8d7f5c; stroke-width: 1; opacity: .9; }
-.grat { stroke: rgba(216, 169, 75, .13); stroke-width: .7; }
-.grat-label { fill: rgba(216, 169, 75, .45); font-family: var(--mono); font-size: 8.5px; }
-.rose-ring { fill: none; stroke: rgba(216, 169, 75, .3); stroke-width: .8; }
-.rose-spoke { stroke: rgba(216, 169, 75, .38); stroke-width: .9; }
-.rose-n { fill: var(--brass); font-family: var(--serif); font-size: 11px; }
-.course { stroke: var(--brass); stroke-width: 1.6; stroke-dasharray: 6 4; opacity: .85; }
-.course-label { fill: var(--brass); font-family: var(--mono); font-size: 9.5px; }
+/* The chart is parchment, so its ink colours are set here rather than
+   inherited from the dark console palette around it. */
+.grat-label   { fill: #6b5228; font-family: var(--serif); font-size: 11px; opacity: .8; }
+.tropic-label { fill: #9a4030; font-family: var(--serif); font-style: italic; font-size: 11px; opacity: .85; }
+.chart-note   { fill: #4a3a1e; font-family: var(--serif); font-size: 11.5px; }
+.chart-note-b { fill: #4a3a1e; font-family: var(--serif); font-size: 12.5px; font-weight: 700; letter-spacing: .04em; }
+.cart-title   { fill: #4a3a1e; font-family: var(--serif); font-size: 21px; letter-spacing: .03em; }
+.cart-line    { fill: #5b431f; font-family: var(--serif); font-style: italic; font-size: 14px; }
+.cart-sub     { fill: #6b5228; font-family: var(--serif); font-size: 12px; }
+.rose-n       { fill: #3d3222; font-family: var(--serif); font-size: 15px; font-weight: 700; }
 
 .port-hit { fill: transparent; }
 .port-g.clickable { cursor: pointer; }
-.port-g.clickable:hover .port-dot { stroke: var(--brass); stroke-width: 2.5; }
-.port-g.clickable:hover .port-label { fill: var(--paper); }
-.port-dot { fill: var(--paper-2); stroke: #2b2318; stroke-width: 1; }
-.port-dot.here { fill: var(--brass); stroke: #fff2cf; stroke-width: 2; }
-.port-dot.dest { fill: var(--verd); stroke: #cffbe9; stroke-width: 2; }
-.port-dot.shut { fill: #4c4638; }
-.port-dot.blockaded { fill: var(--rust); }
-.port-label { fill: var(--paper-2); font-family: var(--sans); font-size: 10.5px; }
-.port-label.shut { fill: #6a634f; }
+.port-g.clickable:hover .port-dot { stroke: #9a4030; stroke-width: 2.4; }
+.port-g.clickable:hover .port-label { fill: #9a4030; font-weight: 700; }
+.port-dot { fill: #f2ead4; stroke: #3d3222; stroke-width: 1.4; }
+.port-dot.here { fill: #d8a94b; stroke: #5b431f; stroke-width: 2; }
+.port-dot.dest { fill: #3f6b45; stroke: #22331f; stroke-width: 2; }
+.port-dot.shut { fill: #b3a68a; stroke: #7a6b4c; stroke-width: 1; }
+.port-dot.blockaded { fill: #9a4030; stroke: #4a1c14; }
+.here-halo { fill: none; stroke: #d8a94b; stroke-width: 1.2; opacity: .55; }
+.port-label { fill: #33291a; font-family: var(--serif); font-size: 13px; paint-order: stroke;
+  stroke: rgba(239,230,205,.85); stroke-width: 3px; stroke-linejoin: round; }
+.port-label.shut { fill: #8a7a5c; }
+.port-label.is-here { font-weight: 700; fill: #7a4a12; }
+
+.course        { stroke: #9a4030; stroke-width: 2; stroke-dasharray: 9 5; }
+.course-shadow { stroke: rgba(239,230,205,.9); stroke-width: 5; }
+.course-label  { fill: #6b2418; font-family: var(--serif); font-size: 11.5px; letter-spacing: .02em; }
 
 .dest-detail { flex: 1 1 auto; overflow-y: auto; }
 .dest-figs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 4px; }

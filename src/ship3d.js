@@ -15,10 +15,100 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
 /* ------------------------------------------------------- hull geometry ---- */
 
-// Shared with the deck builder so the deck sits exactly inside the gunwale.
+// The three curves that define the hull. Hoisted to module scope because the
+// wales, the deck and the rail all have to follow exactly the same shape — the
+// moment they are approximated separately you get gaps and floating trim.
 const beamProfile = (u) =>
   Math.pow(Math.sin(Math.PI * clamp(u * 1.14, 0, 1)), 0.62) *
   (1 - Math.pow(clamp((u - 0.72) / 0.28, 0, 1), 1.8) * 0.42);
+
+const draftProfile = (u) =>
+  Math.pow(Math.sin(Math.PI * clamp(u * 1.06, 0, 1)), 0.5) *
+  (1 - Math.pow(clamp((u - 0.85) / 0.15, 0, 1), 2) * 0.55);
+
+const sheerProfile = (u) => 0.62 + 0.72 * Math.pow(Math.abs(u - 0.46) * 2.05, 1.7);
+
+/** A point on the hull skin. u runs bow to stern, v runs keel to gunwale. */
+export function hullPoint(u, v, d) {
+  const b = (d.beam * 0.5) * beamProfile(u);
+  const dr = d.draft * draftProfile(u);
+  const sh = d.rise * sheerProfile(u);
+  return {
+    x: b * Math.pow(v, 0.72),
+    y: -dr + (dr + sh) * Math.pow(v, 1.35),
+    z: (u - 0.5) * d.len,
+  };
+}
+
+/**
+ * A wale: the heavy rubbing strake that runs the length of a hull. Built as a
+ * ribbon swept along a constant-v line of the hull skin and pushed slightly
+ * proud, so it hugs the tumblehome instead of hovering over it.
+ *
+ * This replaces a scaled TorusGeometry, which was quick to write and read on
+ * screen as a black hula hoop around the ship.
+ */
+function buildWale(d, v, thickness, proud) {
+  const N = 40;
+  const pos = [], idx = [];
+  for (let i = 0; i <= N; i++) {
+    const u = i / N;
+    const c = hullPoint(u, v, d);
+    // Outward normal in the beam plane, approximated from the local slope.
+    const cUp = hullPoint(u, Math.min(1, v + 0.05), d);
+    const nx = 1, ny = -(cUp.x - c.x) / 0.05 * 0.12;
+    const nl = Math.hypot(nx, ny) || 1;
+    const ox = (nx / nl) * proud, oy = (ny / nl) * proud;
+    for (const side of [1, -1]) {
+      for (const dy of [thickness, -thickness]) {
+        pos.push(side * (c.x + ox), c.y + oy + dy, c.z);
+      }
+    }
+  }
+  // Four vertices per station: stbd-top, stbd-bottom, port-top, port-bottom.
+  for (let i = 0; i < N; i++) {
+    const a = i * 4, b = (i + 1) * 4;
+    idx.push(a, b, a + 1, a + 1, b, b + 1);           // starboard face
+    idx.push(a + 2, a + 3, b + 2, a + 3, b + 3, b + 2); // port face
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/** Oak planking: horizontal strakes with caulked seams and weathering. */
+function plankTexture() {
+  const c = document.createElement("canvas");
+  c.width = 256; c.height = 256;
+  const g = c.getContext("2d");
+  g.fillStyle = "#5b3d22"; g.fillRect(0, 0, 256, 256);
+  for (let y = 0; y < 256; y += 8) {
+    const shade = 0.82 + Math.random() * 0.36;
+    g.fillStyle = `rgb(${Math.round(91 * shade)},${Math.round(61 * shade)},${Math.round(34 * shade)})`;
+    g.fillRect(0, y, 256, 7);
+    g.fillStyle = "rgba(24,14,7,0.55)";           // the caulked seam
+    g.fillRect(0, y + 7, 256, 1);
+  }
+  // Butt joints between plank ends, and a little tar and salt staining.
+  g.fillStyle = "rgba(24,14,7,0.4)";
+  for (let i = 0; i < 90; i++) {
+    const x = Math.random() * 256, y = Math.floor(Math.random() * 32) * 8;
+    g.fillRect(x, y, 1.2, 7);
+  }
+  g.fillStyle = "rgba(180,190,180,0.05)";
+  for (let i = 0; i < 40; i++) {
+    g.beginPath();
+    g.ellipse(Math.random() * 256, Math.random() * 256, 6 + Math.random() * 22, 3 + Math.random() * 8, 0, 0, 7);
+    g.fill();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(3, 2);
+  return t;
+}
 
 /**
  * Loft a hull.
@@ -27,49 +117,40 @@ const beamProfile = (u) =>
  *  draft — keel below the waterline
  *  rise  — freeboard at the waist
  */
-function buildHull({ len, beam, draft, rise }) {
-  const STATIONS = 28;
-  const RIBS = 13;
-
-  const beamAt = (u) => (beam * 0.5) * beamProfile(u);
-  // Deepest just aft of midships, rockered up to stem and transom.
-  const draftAt = (u) => draft * Math.pow(Math.sin(Math.PI * clamp(u * 1.06, 0, 1)), 0.5) *
-    (1 - Math.pow(clamp((u - 0.85) / 0.15, 0, 1), 2) * 0.55);
-  // High at bow and stern, low at the waist. This line is what makes a hull
-  // read as a ship rather than a hot dog.
-  const sheerAt = (u) => rise * (0.62 + 0.72 * Math.pow(Math.abs(u - 0.46) * 2.05, 1.7));
-
-  const pos = [], idx = [], grid = [];
+export function buildHull(d) {
+  const STATIONS = 34;
+  const RIBS = 15;
+  const pos = [], uvs = [], idx = [], grid = [];
 
   for (let i = 0; i < STATIONS; i++) {
     const u = i / (STATIONS - 1);
-    const z = (u - 0.5) * len;
-    const b = beamAt(u), d = draftAt(u), s = sheerAt(u);
     const row = [];
     for (let j = 0; j < RIBS; j++) {
-      const v = j / (RIBS - 1);              // 0 = keel, 1 = gunwale
-      const x = b * Math.pow(v, 0.72);       // rounded V, straightening as it rises
-      const y = -d + (d + s) * Math.pow(v, 1.35);
+      const v = j / (RIBS - 1);
+      const p = hullPoint(u, v, d);
       row.push(pos.length / 3);
-      pos.push(x, y, z);
+      pos.push(p.x, p.y, p.z);
+      uvs.push(u, v);
     }
     grid.push(row);
   }
 
   for (let i = 0; i < STATIONS - 1; i++) {
     for (let j = 0; j < RIBS - 1; j++) {
-      const a = grid[i][j], b = grid[i][j + 1], c = grid[i + 1][j], d = grid[i + 1][j + 1];
-      idx.push(a, c, b, b, c, d);
+      const a = grid[i][j], b = grid[i][j + 1], c = grid[i + 1][j], e = grid[i + 1][j + 1];
+      idx.push(a, c, b, b, c, e);
     }
   }
 
-  // Mirror to port, with the winding flipped so the normals face outward.
+  // Mirror to port with the winding flipped so the normals face outward.
   const half = pos.length / 3;
-  for (let k = 0; k < half; k++) pos.push(-pos[k * 3], pos[k * 3 + 1], pos[k * 3 + 2]);
+  for (let k = 0; k < half; k++) {
+    pos.push(-pos[k * 3], pos[k * 3 + 1], pos[k * 3 + 2]);
+    uvs.push(uvs[k * 2], uvs[k * 2 + 1]);
+  }
   const tri = idx.length;
   for (let k = 0; k < tri; k += 3) idx.push(idx[k] + half, idx[k + 2] + half, idx[k + 1] + half);
 
-  // Close the transom.
   for (let j = 0; j < RIBS - 1; j++) {
     const s0 = grid[STATIONS - 1][j], s1 = grid[STATIONS - 1][j + 1];
     idx.push(s0, s1, s0 + half, s1, s1 + half, s0 + half);
@@ -77,6 +158,7 @@ function buildHull({ len, beam, draft, rise }) {
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
   geo.setIndex(idx);
   geo.computeVertexNormals();
   return geo;
@@ -176,13 +258,17 @@ export class Ship3D {
     const wear = clamp(spec.condition ?? 1, 0.15, 1);
     const darken = (hex, k) => new THREE.Color(hex).multiplyScalar(0.72 + 0.28 * k);
     this.mat = {
-      hull:   new THREE.MeshStandardMaterial({ color: darken(0x53381f, wear), roughness: 0.88, metalness: 0.02, flatShading: false }),
+      hull:   new THREE.MeshStandardMaterial({
+        map: plankTexture(), color: darken(0xb08a5e, wear),
+        roughness: 0.86, metalness: 0.02,
+      }),
       wale:   new THREE.MeshStandardMaterial({ color: darken(0x2e1d10, wear), roughness: 0.92 }),
       deck:   new THREE.MeshStandardMaterial({ color: darken(0x8a6a44, wear), roughness: 0.86 }),
       trim:   new THREE.MeshStandardMaterial({ color: darken(0x6d4a26, wear), roughness: 0.8 }),
       gold:   new THREE.MeshStandardMaterial({ color: 0xb08d3e, roughness: 0.42, metalness: 0.55 }),
       iron:   new THREE.MeshStandardMaterial({ color: 0x35383c, roughness: 0.62, metalness: 0.6 }),
-      rope:   new THREE.LineBasicMaterial({ color: 0x2b241a, transparent: true, opacity: 0.72 }),
+      rope:   new THREE.LineBasicMaterial({ color: 0x2b241a, transparent: true, opacity: 0.78 }),
+      ratline: new THREE.LineBasicMaterial({ color: 0x4a3d2a, transparent: true, opacity: 0.5 }),
       sail:   new THREE.MeshStandardMaterial({
         map: sailTexture(true), side: THREE.DoubleSide, roughness: 0.95, metalness: 0,
       }),
@@ -193,9 +279,10 @@ export class Ship3D {
   }
 
   _buildHull(S) {
-    const hull = new THREE.Mesh(buildHull({
-      len: this.len, beam: this.beam, draft: 2.6 * S, rise: 2.5 * S,
-    }), this.mat.hull);
+    const dims = { len: this.len, beam: this.beam, draft: 2.6 * S, rise: 2.5 * S };
+    this.dims = dims;
+
+    const hull = new THREE.Mesh(buildHull(dims), this.mat.hull);
     hull.castShadow = true;
     hull.receiveShadow = true;
     this.group.add(hull);
@@ -205,17 +292,26 @@ export class Ship3D {
     deck.receiveShadow = true;
     this.group.add(deck);
 
-    // Wales: rubbing strakes running the sheer. Torus segments are a cheap way
-    // to get a curved strake that hugs the tumblehome.
-    for (const [yy, rr] of [[0.9 * S, 0.97], [1.9 * S, 0.93]]) {
-      const strake = new THREE.Mesh(
-        new THREE.TorusGeometry(this.len * 0.36, 0.16 * S, 6, 40, Math.PI * 2),
-        this.mat.wale
-      );
-      strake.rotation.x = Math.PI / 2;
-      strake.scale.set(this.beam * 0.5 / (this.len * 0.36) * rr, 1, 1);
-      strake.position.y = yy;
+    // Wales, swept along constant-v lines of the hull skin so they follow the
+    // sheer and the tumblehome exactly.
+    for (const [v, th, proud] of [[0.62, 0.20, 0.10], [0.82, 0.16, 0.09], [0.97, 0.13, 0.06]]) {
+      const strake = new THREE.Mesh(buildWale(dims, v, th * S, proud * S), this.mat.wale);
+      strake.castShadow = true;
       this.group.add(strake);
+    }
+
+    // Frame heads standing proud of the rail, the way a period hull shows its
+    // ribs above the sheer strake.
+    for (let i = 2; i < 30; i += 2) {
+      const u = i / 32;
+      const p = hullPoint(u, 1, dims);
+      for (const side of [1, -1]) {
+        const head = new THREE.Mesh(
+          new THREE.BoxGeometry(0.16 * S, 0.55 * S, 0.3 * S), this.mat.wale
+        );
+        head.position.set(side * p.x, p.y + 0.2 * S, p.z);
+        this.group.add(head);
+      }
     }
 
     // Stem post and bowsprit
@@ -306,13 +402,38 @@ export class Ship3D {
       const top = 1.55 * S + height;
       this.masts.push({ mesh: mast, z, height, top });
 
-      // Shrouds: from the channels out at the gunwale up to the masthead.
+      // Shrouds, and the ratlines rung across them. Shrouds alone read as a few
+      // stray threads; it is the horizontal rungs that make rigging look rigged.
+      const SHROUDS = 5;
       for (const side of [-1, 1]) {
-        for (let k = 0; k < 4; k++) {
-          const spread = (0.34 + k * 0.10) * this.beam;
-          const foot = new THREE.Vector3(side * spread, 1.5 * S, z + (k - 1.5) * 0.5 * S);
-          const head = new THREE.Vector3(side * 0.28 * S, top - 1.6 * S, z);
+        const feet = [], heads = [];
+        for (let k = 0; k < SHROUDS; k++) {
+          const spread = (0.30 + k * 0.085) * this.beam;
+          const foot = new THREE.Vector3(side * spread, 1.5 * S, z + (k - (SHROUDS - 1) / 2) * 0.55 * S);
+          const head = new THREE.Vector3(side * 0.26 * S, top - 1.6 * S, z);
+          feet.push(foot); heads.push(head);
           this.group.add(line(foot, head, this.mat.rope));
+
+          // A deadeye where each shroud is set up to the channel.
+          const eye = new THREE.Mesh(new THREE.CylinderGeometry(0.17 * S, 0.17 * S, 0.11 * S, 7), this.mat.trim);
+          eye.rotation.x = Math.PI / 2;
+          eye.position.copy(foot).setY(foot.y + 0.35 * S);
+          this.group.add(eye);
+        }
+        // A channel: the shelf the shrouds are spread on, outboard of the rail.
+        const chan = new THREE.Mesh(
+          new THREE.BoxGeometry(0.5 * S, 0.16 * S, SHROUDS * 0.62 * S), this.mat.wale
+        );
+        chan.position.set(side * 0.40 * this.beam, 1.45 * S, z);
+        this.group.add(chan);
+
+        // Ratlines every 0.42 units up the shrouds, narrowing as they climb.
+        const RUNGS = Math.floor(height / (0.9 * S));
+        for (let r = 1; r < RUNGS; r++) {
+          const t = r / RUNGS;
+          const a = feet[0].clone().lerp(heads[0], t);
+          const b = feet[SHROUDS - 1].clone().lerp(heads[SHROUDS - 1], t);
+          this.group.add(line(a, b, this.mat.ratline));
         }
       }
       // Forestay and backstay

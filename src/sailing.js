@@ -151,7 +151,14 @@ export class Voyage {
     this.scene.add(this.harbour.group);
 
     this.windFrom = opts.windDeg;
-    this.windKn = opts.windKn ?? 14;
+    this.baseWindKn = opts.windKn ?? 14;
+    this.windKn = this.baseWindKn;
+    this.gust = 0;            // -1 lull .. +1 hard gust
+    this.gustPhase = Math.random() * 100;
+    this.heelAngle = 0;       // radians, spring-damped
+    this.heelVel = 0;
+    this.pitchAngle = 0;
+    this.pitchVel = 0;
     this.maxKn = Math.max(3, opts.shipSpec?.speedKn ?? 7);
 
     // Start downwind of the berth and off to one side, so the run in is a
@@ -248,9 +255,19 @@ export class Voyage {
     const wantRudder = clamp((leftKey ? -1 : 0) + (rightKey ? 1 : 0) + this.touchRudder, -1, 1);
     this.rudder += (wantRudder - this.rudder) * clamp(dt * 5.5, 0, 1);
 
+    // The wind is never steady. Two slow sine terms of different periods give
+    // gusts and lulls that arrive at irregular intervals without needing noise,
+    // and the heading wanders a few degrees with them the way real wind does.
+    this.gustPhase += dt;
+    const g1 = Math.sin(this.gustPhase * 0.21);
+    const g2 = Math.sin(this.gustPhase * 0.083 + 2.1);
+    this.gust = clamp(g1 * 0.6 + g2 * 0.55, -1, 1);
+    this.windKn = Math.max(2, this.baseWindKn * (1 + this.gust * 0.32));
+    this.windFrom = (this.opts.windDeg + g2 * 7 + 360) % 360;
+
     const twa = angleDiff(this.heading, this.windFrom);
     const power = sailPower(twa);
-    const windScale = clamp(this.windKn / 14, 0.55, 1.45);
+    const windScale = clamp(this.windKn / 14, 0.45, 1.7);
     const targetKn = this.trim * this.maxKn * power * windScale;
 
     // She builds way slowly and loses it fast. That asymmetry is the game.
@@ -300,10 +317,26 @@ export class Voyage {
     const n = waveNormal(this.pos.x, this.pos.z, this.t, 4);
     const roll = Math.asin(clamp(n.x * Math.cos(hRad) - n.z * Math.sin(hRad), -1, 1));
     const pitch = Math.asin(clamp(n.x * Math.sin(hRad) + n.z * Math.cos(hRad), -1, 1));
+
+    // Heel is a damped spring rather than a value assigned straight from the
+    // wind. A hull has mass and a righting moment: she leans INTO a gust over a
+    // second or so, hangs there, and rolls back upright when it eases. Setting
+    // the angle directly made her snap between attitudes like a hinge.
     const heelSign = Math.sin((this.heading - this.windFrom) * DEG);
-    const heel = heelSign * this.trim * power * 0.20 * windScale;
-    grp.rotation.z = -roll * 0.75 + heel;
-    grp.rotation.x = pitch * 0.75;
+    const heelTarget = -roll * 0.72 + heelSign * this.trim * power * 0.30 * windScale;
+    const STIFF = 26, DAMP = 6.4;        // righting moment, and the water's drag on it
+    this.heelVel += (heelTarget - this.heelAngle) * STIFF * dt - this.heelVel * DAMP * dt;
+    this.heelAngle += this.heelVel * dt;
+    this.heelAngle = clamp(this.heelAngle, -0.55, 0.55);
+
+    // Pitch: the swell drives it, and driving hard into a head sea lifts the bow.
+    const bury = clamp(Math.cos(twa * DEG), -1, 1) * -1;
+    const pitchTarget = pitch * 0.72 + bury * (this.speedKn / this.maxKn) * 0.05;
+    this.pitchVel += (pitchTarget - this.pitchAngle) * 30 * dt - this.pitchVel * 7 * dt;
+    this.pitchAngle += this.pitchVel * dt;
+
+    grp.rotation.z = this.heelAngle;
+    grp.rotation.x = this.pitchAngle;
 
     const speedFrac = this.speedKn / this.maxKn;
     const night = 1 - clamp((this.sky.sunDir.y + 0.12) / 0.42, 0, 1);
@@ -321,7 +354,8 @@ export class Voyage {
     this.sun.target.position.copy(grp.position);
     this.sun.target.updateMatrixWorld();
 
-    this.ocean.update(this.t, this.pos, this.camera, { ...p, sunDir: this.sky.sunDir });
+    this.ocean.update(this.t, this.pos, this.camera, { ...p, sunDir: this.sky.sunDir },
+      { kn: this.windKn, fromDeg: this.windFrom });
     this.harbour.update(this.t, night);
 
     const aligned = angleDiff(this.heading, this.berthHeading) < 60;
@@ -344,6 +378,8 @@ export class Voyage {
       progress: clamp(1 - dist / this.startDist, 0, 1),
       windFrom: this.windFrom,
       windKn: this.windKn,
+      gust: this.gust,
+      heelDeg: Math.round((this.heelAngle * 180) / Math.PI),
       inIrons: twa < 30,
       dockable: this.dockable,
       night,
@@ -353,9 +389,16 @@ export class Voyage {
   _camera(dt, fwd, g, speedFrac) {
     let desired, look;
     if (this.camMode === 0) {
-      const back = 52 + speedFrac * 16;
-      desired = new THREE.Vector3(g.x - fwd.x * back, g.y + 26, g.z - fwd.z * back);
-      look = new THREE.Vector3(g.x + fwd.x * 26, g.y + 5, g.z + fwd.z * 26);
+      // Quarter view from astern and above, opening out as she picks up speed
+      // so the sense of motion comes from the frame as well as the wake.
+      const back = 74 + speedFrac * 26;
+      const side = new THREE.Vector3(fwd.z, 0, -fwd.x);
+      const off = 13 + speedFrac * 7;
+      desired = new THREE.Vector3(
+        g.x - fwd.x * back + side.x * off,
+        g.y + 34 + speedFrac * 9,
+        g.z - fwd.z * back + side.z * off);
+      look = new THREE.Vector3(g.x + fwd.x * 30, g.y + 9, g.z + fwd.z * 30);
     } else if (this.camMode === 1) {
       const side = new THREE.Vector3(fwd.z, 0, -fwd.x);
       desired = new THREE.Vector3(
@@ -371,6 +414,7 @@ export class Voyage {
     if (!this._look) this._look = look.clone();
     this._look.lerp(look, clamp(dt * 3.4, 0, 1));
     this.camera.lookAt(this._look);
+    this.camera.rotation.z += (this.heelAngle || 0) * 0.16;
   }
 
   _loop() {

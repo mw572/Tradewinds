@@ -7,6 +7,7 @@
 // authored by hand.
 
 import * as THREE from "three";
+import { buildHull } from "./ship3d.js";
 
 const rngFrom = (str) => {
   let h = 2166136261;
@@ -58,33 +59,105 @@ export class Harbour {
         .addScaledVector(side, offshore)
         .setY(y);
 
-    /* ---- the land: terraces rising away from the water, not a flat slab ----
-     * Each shelf is set further offshore and stands higher than the last, so
-     * the coast reads as ground climbing from a low foreshore to a headland
-     * behind the town. Deep boxes, so no shelf edge is visible from seaward. */
-    // The near edge of the first shelf must clear the pier, or the coast eats
-    // the berth you are trying to steer into.
-    const DEPTH = 240 * S;
-    for (let i = 0; i < 6; i++) {
-      const w = (400 - i * 44) * S;
-      const top = (3.5 + i * i * 1.15) * S;       // height of this shelf above the water
-      const h = top + 70 * S;                     // buried deep, so no floating edge shows
-      const slab = new THREE.Mesh(new THREE.BoxGeometry(w, h, DEPTH), mat.land);
-      slab.position.copy(at((rnd() - 0.5) * 44 * S, (DEPTH / 2 + 58 * S) + i * 66 * S, top - h / 2));
-      slab.rotation.y = hRad + (rnd() - 0.5) * 0.18;
-      slab.receiveShadow = true;
-      this.group.add(slab);
+    /* ------------------------------- the land -------------------------------
+     * A heightmap, not stacked boxes. Ground height is a ramp from the
+     * waterline plus two octaves of value noise, so the coast has bays and
+     * headlands instead of a straight edge, and the ground behind the town
+     * rises into hills. Colour is per-vertex by height and slope: wet sand,
+     * dry sand, grass, scrub, then bare rock on anything steep.
+     *
+     * The harbour basin is carved by pulling the height down inside a radius
+     * of the berth, which is what stops the town growing over the water you
+     * are trying to steer into. */
+    const TERRAIN_SIZE = 1500 * S;
+    const TERRAIN_SEG = 132;
+    const SHORE_AT = 46 * S;          // offshore distance where the ground meets the sea
+
+    const n2 = (x, y) => {
+      const xi = Math.floor(x), yi = Math.floor(y);
+      const xf = x - xi, yf = y - yi;
+      const h = (a, b) => {
+        let v = Math.imul(a * 374761393 + b * 668265263, 1274126177);
+        v = (v ^ (v >>> 13)) >>> 0;
+        return v / 4294967296;
+      };
+      const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+      return (h(xi, yi) * (1 - u) + h(xi + 1, yi) * u) * (1 - v) +
+             (h(xi, yi + 1) * (1 - u) + h(xi + 1, yi + 1) * u) * v;
+    };
+    const fbm = (x, y) =>
+      n2(x, y) * 0.55 + n2(x * 2.1 + 5.3, y * 2.1 + 1.7) * 0.28 +
+      n2(x * 4.3 + 9.1, y * 4.3 + 3.3) * 0.17;
+
+    // Height above sea level at a point given in (alongBerth, offshore) units.
+    const groundAt = (along, off) => {
+      const a = along / S, o = off / S;
+      // Coastline wobble: the shore is not a ruled line.
+      const wobble = (fbm(a * 0.006 + 3.1, 17.0) - 0.5) * 84;
+      const d = o - (SHORE_AT / S) - wobble;         // metres inland of the shore
+      if (d < -60) return -9 * S;                    // well out to sea
+      // Ramp inland, then hills, with a bay scooped out around the berth.
+      const ramp = Math.min(1, Math.max(0, d / 105));
+      const hill = fbm(a * 0.0045 + 11, o * 0.0045 + 7) * 44 + fbm(a * 0.013, o * 0.013) * 13;
+      let h = -7 + ramp * (15 + hill * ramp);
+      // Carve the basin: pull everything down near the berth so there is water
+      // to manoeuvre in, and a shelving bottom rather than a cliff.
+      const distBerth = Math.hypot(a, o);
+      h -= Math.max(0, 1 - distBerth / 190) * 62;
+      return h * S;
+    };
+    this.groundAt = groundAt;
+
+    const tGeo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, TERRAIN_SEG, TERRAIN_SEG);
+    tGeo.rotateX(-Math.PI / 2);
+    const tp = tGeo.attributes.position;
+    const colors = new Float32Array(tp.count * 3);
+    const CG = {
+      wet:   new THREE.Color(0xa89468),
+      sand:  new THREE.Color(0xd6c493),
+      grass: new THREE.Color(pal.land),
+      dry:   new THREE.Color(pal.land).lerp(new THREE.Color(0xb9b06a), 0.45),
+      rock:  new THREE.Color(pal.stone).multiplyScalar(0.92),
+    };
+    const tmpC = new THREE.Color();
+
+    // The plane's local +x runs along the berth and +z runs offshore; the mesh
+    // is rotated into place afterwards, so the height function reads directly.
+    for (let i = 0; i < tp.count; i++) {
+      const lx = tp.getX(i), lz = tp.getZ(i);
+      const off = lz + TERRAIN_SIZE / 2;
+      const h = groundAt(lx, off);
+      tp.setY(i, h);
     }
-    // A pale foreshore where the ground meets the sea. Narrower than the shelf
-    // behind it, or it juts out past the coast as a bare rectangle.
-    const beach = new THREE.Mesh(
-      new THREE.BoxGeometry(330 * S, 6 * S, 44 * S),
-      new THREE.MeshStandardMaterial({ color: 0xc9b98f, roughness: 1 })
-    );
-    beach.position.copy(at(0, 42 * S, 1.2 * S));
-    beach.rotation.y = hRad;
-    beach.receiveShadow = true;
-    this.group.add(beach);
+    tGeo.computeVertexNormals();
+
+    const tn = tGeo.attributes.normal;
+    for (let i = 0; i < tp.count; i++) {
+      const h = tp.getY(i) / S;
+      const slope = 1 - Math.abs(tn.getY(i));
+      if (h < -1.0) tmpC.copy(CG.wet);
+      else if (h < 1.6) tmpC.copy(CG.wet).lerp(CG.sand, (h + 1.0) / 2.6);
+      else if (h < 5.5) tmpC.copy(CG.sand).lerp(CG.grass, (h - 1.6) / 3.9);
+      else if (h < 40) tmpC.copy(CG.grass);
+      else if (h < 68) tmpC.copy(CG.grass).lerp(CG.dry, (h - 40) / 28);
+      else tmpC.copy(CG.dry).lerp(CG.rock, Math.min(1, (h - 68) / 45));
+      if (slope > 0.42) tmpC.lerp(CG.rock, Math.min(1, (slope - 0.42) * 2.2));
+      // Break up the flat fill so a hillside is not one colour.
+      const j = 0.94 + fbm(tp.getX(i) * 0.05, tp.getZ(i) * 0.05) * 0.14;
+      colors[i * 3] = tmpC.r * j;
+      colors[i * 3 + 1] = tmpC.g * j;
+      colors[i * 3 + 2] = tmpC.b * j;
+    }
+    tGeo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+
+    const terrain = new THREE.Mesh(tGeo, new THREE.MeshStandardMaterial({
+      vertexColors: true, roughness: 0.97, metalness: 0, flatShading: false,
+    }));
+    terrain.position.copy(at(0, TERRAIN_SIZE / 2, 0));
+    terrain.rotation.y = hRad;
+    terrain.receiveShadow = true;
+    terrain.castShadow = true;
+    this.group.add(terrain);
 
     /* ------------------------------ the pier ------------------------------ */
     const pier = new THREE.Mesh(new THREE.BoxGeometry(11 * S, 7 * S, 88 * S), mat.stone);
@@ -126,15 +199,15 @@ export class Harbour {
       const storeys = 1 + Math.floor(rnd() * (spec.style === "city" ? 4 : 2));
       const h = (7 + storeys * 4.5) * S;
 
-      const along = (rnd() - 0.5) * 250 * S;
-      // Push the town up the hill: further from the water means higher ground.
-      // The 66 floor keeps every building on the first shelf rather than
-      // standing in the harbour.
-      const off = (66 + rnd() * 230) * S;
-      const ground = Math.min(24 * S, Math.pow((off / S - 58) / 66, 2) * 1.15 * S + 3.5 * S);
+      const along = (rnd() - 0.5) * 300 * S;
+      const off = (78 + rnd() * 260) * S;
+      const ground = groundAt(along, off);
+      if (ground < 1.5 * S) continue;      // do not build below the tide line
 
       const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat.walls[Math.floor(rnd() * mat.walls.length)]);
-      b.position.copy(at(along, off, ground + h / 2));
+      // Sunk by a fifth of their height: on a slope a box placed exactly on the
+      // sampled height leaves daylight under its downhill corner.
+      b.position.copy(at(along, off, ground + h / 2 - h * 0.20));
       b.rotation.y = hRad + (rnd() - 0.5) * 0.55;
       b.castShadow = true; b.receiveShadow = true;
       this.group.add(b);
@@ -158,25 +231,25 @@ export class Harbour {
     /* ------------------------- landmark per style ------------------------- */
     if (spec.style === "fortress") {
       const keep = new THREE.Mesh(new THREE.BoxGeometry(46 * S, 26 * S, 46 * S), mat.stone);
-      keep.position.copy(at(-70 * S, 150 * S, 15 * S));
+      keep.position.copy(at(-70 * S, 150 * S, groundAt(-70 * S, 150 * S) + 13 * S));
       keep.rotation.y = hRad;
       keep.castShadow = true;
       this.group.add(keep);
       for (const [dx, dz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
         const t = new THREE.Mesh(new THREE.CylinderGeometry(7 * S, 8 * S, 34 * S, 10), mat.stone);
-        t.position.copy(at((-70 + dx * 24) * S, (150 + dz * 24) * S, 18 * S));
+        t.position.copy(at((-70 + dx * 24) * S, (150 + dz * 24) * S, groundAt((-70 + dx * 24) * S, (150 + dz * 24) * S) + 17 * S));
         t.castShadow = true;
         this.group.add(t);
       }
     } else if (spec.style === "kasbah") {
       const wall = new THREE.Mesh(new THREE.BoxGeometry(190 * S, 14 * S, 5 * S), mat.stone);
-      wall.position.copy(at(0, 165 * S, 13 * S));
+      wall.position.copy(at(0, 165 * S, groundAt(0, 165 * S) + 7 * S));
       wall.rotation.y = hRad;
       this.group.add(wall);
     } else {
       // A cathedral or a great church
       const nave = new THREE.Mesh(new THREE.BoxGeometry(20 * S, 22 * S, 34 * S), mat.walls[0]);
-      nave.position.copy(at(-58 * S, 158 * S, 14 * S));
+      nave.position.copy(at(-58 * S, 158 * S, groundAt(-58 * S, 158 * S) + 11 * S));
       nave.rotation.y = hRad;
       nave.castShadow = true;
       this.group.add(nave);
@@ -189,7 +262,8 @@ export class Harbour {
     if (spec.lighthouse) {
       const towerH = 40 * S;
       const tower = new THREE.Mesh(new THREE.CylinderGeometry(4.2 * S, 6.4 * S, towerH, 14), mat.stone);
-      const tPos = at(-118 * S, 30 * S, towerH / 2 - 3 * S);
+      const gh = Math.max(0, groundAt(-118 * S, 52 * S));
+      const tPos = at(-118 * S, 52 * S, gh + towerH / 2 - 4 * S);
       tower.position.copy(tPos);
       tower.castShadow = true;
       this.group.add(tower);
@@ -205,29 +279,37 @@ export class Harbour {
       this.group.add(this.beacon);
     }
 
-    /* -------------------------- moored shipping -------------------------- */
+    /* -------------------------- moored shipping --------------------------
+     * Real lofted hulls at a smaller scale. These were a scaled hemisphere with
+     * two sails floating above it, which from the water read as canvas on
+     * sticks with no boat underneath. */
     for (let i = 0; i < (spec.moored || 0); i++) {
       const m = new THREE.Group();
-      const hull = new THREE.Mesh(
-        new THREE.SphereGeometry(6 * S, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), mat.wood
-      );
-      hull.rotation.x = Math.PI;
-      hull.scale.set(0.42, 0.55, 1.5);
+      const sc = 0.42 + rnd() * 0.30;
+      const dims = { len: 26 * S * sc, beam: 7.4 * S * sc, draft: 2.6 * S * sc, rise: 2.5 * S * sc };
+      const hull = new THREE.Mesh(buildHull(dims), mat.wood);
+      hull.castShadow = true;
       m.add(hull);
-      for (let k = 0; k < 2; k++) {
-        const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.2 * S, 0.3 * S, 20 * S, 6), mat.wood);
-        mast.position.set(0, 10 * S, (k - 0.5) * 6 * S);
+
+      const masts = 1 + Math.floor(rnd() * 2);
+      for (let k = 0; k < masts; k++) {
+        const mh = 15 * S * sc;
+        const z = (k - (masts - 1) / 2) * 6 * S * sc;
+        const mast = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.16 * S * sc, 0.24 * S * sc, mh, 6), mat.wood);
+        mast.position.set(0, 1.4 * S * sc + mh / 2, z);
         m.add(mast);
-        const sail = new THREE.Mesh(
-          new THREE.PlaneGeometry(7 * S, 8 * S),
-          new THREE.MeshStandardMaterial({ color: 0xe4dcc6, side: THREE.DoubleSide, roughness: 0.95 })
-        );
-        sail.position.set(0, 13 * S, (k - 0.5) * 6 * S + 0.4);
-        m.add(sail);
+        // Furled, because a ship at her moorings does not carry canvas.
+        const furl = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.42 * S * sc, 0.42 * S * sc, 6 * S * sc, 6),
+          new THREE.MeshStandardMaterial({ color: 0xded5bd, roughness: 0.95 }));
+        furl.rotation.z = Math.PI / 2;
+        furl.position.set(0, 1.4 * S * sc + mh * 0.62, z);
+        m.add(furl);
       }
-      m.position.copy(at((-70 + i * 34 + rnd() * 12) * S, (24 + rnd() * 14) * S, 0));
-      m.rotation.y = hRad + (rnd() - 0.5) * 0.5;
-      m.castShadow = true;
+      m.position.copy(at((-80 + i * 38 + rnd() * 14) * S, (26 + rnd() * 18) * S, -0.4 * S));
+      m.rotation.y = hRad + (rnd() - 0.5) * 0.7;
+      m.rotation.z = (rnd() - 0.5) * 0.06;
       this.group.add(m);
     }
 
@@ -246,7 +328,7 @@ export class Harbour {
     for (let i = 0; i < 2; i++) {
       const markH = (14 + i * 9) * S;
       const mark = new THREE.Mesh(new THREE.ConeGeometry(2.4 * S, markH, 4), mat.stone);
-      mark.position.copy(at(0, (78 + i * 46) * S, markH / 2 + 3 * S));
+      mark.position.copy(at(0, (78 + i * 46) * S, Math.max(0, groundAt(0, (78 + i * 46) * S)) + markH / 2));
       mark.rotation.y = hRad + Math.PI / 4;
       this.group.add(mark);
     }
