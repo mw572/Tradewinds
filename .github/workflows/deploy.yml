@@ -12,7 +12,9 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  # Queue deploys rather than cancelling them. Cancelling mid-flight leaves the
+  # Pages deployment in a cancelled state and the next run inherits the mess.
+  cancel-in-progress: false
 
 jobs:
   deploy:
