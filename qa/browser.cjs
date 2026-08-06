@@ -56,6 +56,8 @@ const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name) });
   const cash0 = await page.textContent('#stat-cash');
   check(/1,400/.test(cash0), `you start with £1,400 (got ${cash0})`);
 
+  check(!(await page.isVisible('#stat-debt-wrap')), 'the debt readout is hidden while you owe nothing');
+
   const rowCount = await page.locator('#market-rows tr').count();
   check(rowCount >= 15, `the exchange lists every commodity (${rowCount})`);
   const sparks = await page.locator('#market-rows .spark').count();
