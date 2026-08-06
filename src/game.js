@@ -454,8 +454,11 @@ function startVoyage() {
 
   const windDeg = Math.floor(Math.random() * 360);
   const windKn = 8 + Math.floor(Math.random() * 18);
-  // Time of day drifts with the game day, so successive landfalls differ.
-  const dayFraction = ((h.day * 0.37) % 1) * 0.62 + 0.16;
+  // Time of day drifts with the game day so successive landfalls differ, but it
+  // stays between early morning and late afternoon. The night palette is
+  // gorgeous on the water and turns the ship into a grey silhouette, which is
+  // not what you want on the screen you spend the voyage looking at.
+  const dayFraction = 0.30 + ((h.day * 0.37) % 1) * 0.42;
 
   $("hud-dest").textContent = dest.name;
   $("hud-wind").textContent = `${cardinal(windDeg)} ${windKn} kn`;

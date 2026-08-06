@@ -182,13 +182,18 @@ function buildDeck({ len, beam, y }) {
 /* --------------------------------------------------------------- sails ---- */
 
 function squareSail(w, h, belly = 1.0) {
-  const geo = new THREE.PlaneGeometry(w, h, 12, 8);
+  const geo = new THREE.PlaneGeometry(w, h, 16, 10);
   const p = geo.attributes.position;
   for (let i = 0; i < p.count; i++) {
     const x = p.getX(i), y = p.getY(i);
+    // Belly: full across the middle, pinched at the leeches where the sail is
+    // bent to the yard and hauled down at the clews.
     const acrossW = Math.cos((x / w) * Math.PI);
-    const acrossH = Math.cos((y / h) * Math.PI) * 0.45 + 0.55;
-    p.setZ(i, -acrossW * acrossH * belly * (h * 0.17));
+    const down = (y / h) + 0.5;                        // 0 at the foot, 1 at the head
+    const acrossH = Math.sin(down * Math.PI) * 0.55 + 0.45;
+    p.setZ(i, -acrossW * acrossH * belly * (h * 0.30));
+    // The foot scoops: an unsheeted sail hangs in a curve, not a straight edge.
+    if (down < 0.06) p.setY(i, y + Math.abs(acrossW) * h * 0.07);
   }
   geo.computeVertexNormals();
   return geo;
@@ -269,11 +274,15 @@ export class Ship3D {
       iron:   new THREE.MeshStandardMaterial({ color: 0x35383c, roughness: 0.62, metalness: 0.6 }),
       rope:   new THREE.LineBasicMaterial({ color: 0x2b241a, transparent: true, opacity: 0.78 }),
       ratline: new THREE.LineBasicMaterial({ color: 0x4a3d2a, transparent: true, opacity: 0.5 }),
+      // Canvas is thin and lit from both sides: a real sail glows a little where
+      // the sun is behind it. A plain opaque standard material reads as card.
       sail:   new THREE.MeshStandardMaterial({
-        map: sailTexture(true), side: THREE.DoubleSide, roughness: 0.95, metalness: 0,
+        map: sailTexture(true), side: THREE.DoubleSide, roughness: 0.92, metalness: 0,
+        emissive: 0x6b5f45, emissiveIntensity: 0.30,
       }),
       sailPlain: new THREE.MeshStandardMaterial({
-        map: sailTexture(false), side: THREE.DoubleSide, roughness: 0.95, metalness: 0,
+        map: sailTexture(false), side: THREE.DoubleSide, roughness: 0.92, metalness: 0,
+        emissive: 0x6b5f45, emissiveIntensity: 0.30,
       }),
     };
   }
@@ -330,13 +339,31 @@ export class Ship3D {
   _buildCastles(S, spec) {
     // Sterncastle: the raised aft structure with the great cabin under it.
     const castleH = (spec.type === "galleon" || spec.type === "carrack") ? 4.4 : 2.9;
-    const castle = new THREE.Mesh(
-      new THREE.BoxGeometry(this.beam * 0.72, castleH * S, this.len * 0.24),
-      this.mat.trim
-    );
+    // Tapered: narrower at the top and drawn in aft, which is what a stern
+    // actually does. A straight box reads as a shed on a boat.
+    const castleGeo = new THREE.CylinderGeometry(1, 1, castleH * S, 4, 1);
+    castleGeo.rotateY(Math.PI / 4);
+    castleGeo.scale(this.beam * 0.38, 1, this.len * 0.13);
+    const cp = castleGeo.attributes.position;
+    for (let i = 0; i < cp.count; i++) {
+      if (cp.getY(i) > 0) { cp.setX(i, cp.getX(i) * 0.84); cp.setZ(i, cp.getZ(i) * 0.90); }
+    }
+    castleGeo.computeVertexNormals();
+    const castle = new THREE.Mesh(castleGeo, this.mat.trim);
     castle.position.set(0, (1.55 + castleH / 2) * S, this.len * 0.31);
     castle.castShadow = true;
     this.group.add(castle);
+
+    // Taffrail round the poop.
+    const rail = new THREE.Mesh(
+      new THREE.TorusGeometry(this.beam * 0.30, 0.11 * S, 5, 4),
+      this.mat.wale
+    );
+    rail.rotation.x = Math.PI / 2;
+    rail.rotation.z = Math.PI / 4;
+    rail.scale.set(1, this.len * 0.115 / (this.beam * 0.30), 1);
+    rail.position.set(0, (1.55 + castleH) * S + 0.5 * S, this.len * 0.31);
+    this.group.add(rail);
 
     const poop = new THREE.Mesh(
       new THREE.BoxGeometry(this.beam * 0.6, 0.34 * S, this.len * 0.2),

@@ -57,7 +57,7 @@ export class Voyage {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.toneMappingExposure = 1.15;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
@@ -146,36 +146,50 @@ export class Voyage {
     if (this.harbour) { this.scene.remove(this.harbour.group); this.harbour.dispose(); }
     this.berth = new THREE.Vector3(0, 0, 0);
     this.berthRadius = 26;
-    this.berthHeading = opts.windDeg;                 // moored bow to wind
+
+    // The quay runs alongshore and the land sits to one side of it. That
+    // orientation has to be fixed per port and independent of the weather:
+    // when it was tied to the wind direction the whole coast swung round with
+    // it, and on some headings the ship spawned several hundred metres inland.
+    let hash = 0;
+    for (let i = 0; i < opts.port.id.length; i++) hash = (hash * 31 + opts.port.id.charCodeAt(i)) >>> 0;
+    this.berthHeading = (hash % 360);
     this.harbour = new Harbour(opts.port, this.berth, this.berthHeading, this.berthRadius);
     this.scene.add(this.harbour.group);
 
-    this.windFrom = opts.windDeg;
+    // Seaward is the opposite of the direction the harbour builds its land in.
+    const bRad = this.berthHeading * DEG;
+    const fwdB = new THREE.Vector3(Math.sin(bRad), 0, -Math.cos(bRad));   // along the quay
+    const sideB = new THREE.Vector3(fwdB.z, 0, -fwdB.x);                  // toward the land
+    const seaward = sideB.clone().negate();
+
+    // The wind blows across the approach rather than straight down it, so
+    // there is a real sailing problem in getting alongside.
+    this.windFrom = (this.berthHeading + (Math.random() < 0.5 ? -1 : 1) * (55 + Math.random() * 55) + 360) % 360;
+    this.opts.windDeg = this.windFrom;
     this.baseWindKn = opts.windKn ?? 14;
     this.windKn = this.baseWindKn;
-    this.gust = 0;            // -1 lull .. +1 hard gust
+    this.gust = 0;
     this.gustPhase = Math.random() * 100;
-    this.heelAngle = 0;       // radians, spring-damped
+    this.heelAngle = 0;
     this.heelVel = 0;
     this.pitchAngle = 0;
     this.pitchVel = 0;
     this.maxKn = Math.max(3, opts.shipSpec?.speedKn ?? 7);
 
-    // Start downwind of the berth and off to one side, so the run in is a
-    // reach rather than a beat. Starting on the direct downwind line would put
-    // her dead head-to-wind, which is in irons, which is unsailable.
+    // Always start well out to sea, offset along the shore so the run in is a
+    // reach rather than a straight line at the quay.
     const startDist = clamp(560 + (opts.legNm ?? 300) * 0.16, 560, 1250);
-    const side = Math.random() < 0.5 ? -1 : 1;
-    const b = (this.windFrom + 180 + side * 52) * DEG;
-    this.pos = new THREE.Vector3(Math.sin(b) * startDist, 0, -Math.cos(b) * startDist);
+    const along = (Math.random() < 0.5 ? -1 : 1) * startDist * 0.45;
+    this.pos = new THREE.Vector3()
+      .addScaledVector(seaward, startDist)
+      .addScaledVector(fwdB, along);
 
     // Head roughly at the berth, but never inside the no-go zone.
     const toBerth = Math.atan2(this.berth.x - this.pos.x, -(this.berth.z - this.pos.z));
     let heading = ((toBerth / DEG) + 360) % 360;
-    if (angleDiff(heading, this.windFrom) < 52) {
-      // Bear away to the side she is already on, so the first thing the player
-      // sees is a drawing sail rather than a luffing one.
-      heading = (this.windFrom + side * 62 + 360) % 360;
+    if (angleDiff(heading, this.windFrom) < 50) {
+      heading = (this.windFrom + (angleDiff((heading + 60) % 360, this.windFrom) > 50 ? 60 : -60) + 360) % 360;
     }
     this.heading = heading;
     this.speedKn = 2.5;
@@ -346,10 +360,11 @@ export class Voyage {
     if (speedFrac > 0.18 && Math.random() < speedFrac * dt * 12) this.ocean.addWake(g.x, g.z);
 
     const p = this.sky.palette;
-    this.hemi.intensity = 0.35 + p.ambient * 0.6;
+    // A floor under the ambient: even at dusk the ship has to read.
+    this.hemi.intensity = 0.62 + p.ambient * 0.72;
     this.hemi.color.copy(p.horizon);
     this.sun.color.copy(p.sunColor);
-    this.sun.intensity = 0.25 + p.intensity * 1.7;
+    this.sun.intensity = 0.55 + p.intensity * 1.85;
     this.sun.position.copy(this.sky.sunDir).multiplyScalar(240).add(grp.position);
     this.sun.target.position.copy(grp.position);
     this.sun.target.updateMatrixWorld();
