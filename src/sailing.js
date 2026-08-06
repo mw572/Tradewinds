@@ -134,7 +134,8 @@ export class Voyage {
     this.onArrive = opts.onArrive;
 
     // Only rebuild the ship when the hull actually changed.
-    const specKey = JSON.stringify([opts.shipSpec?.type, opts.shipSpec?.masts, opts.shipSpec?.armed,
+    const specKey = JSON.stringify([opts.shipSpec?.era, opts.shipSpec?.type,
+      opts.shipSpec?.masts, opts.shipSpec?.armed,
       Math.round((opts.shipSpec?.condition ?? 1) * 4)]);
     if (this._specKey !== specKey) {
       if (this.ship3d) { this.scene.remove(this.ship3d.group); this.ship3d.dispose(); }
@@ -163,6 +164,8 @@ export class Voyage {
     const sideB = new THREE.Vector3(fwdB.z, 0, -fwdB.x);                  // toward the land
     const seaward = sideB.clone().negate();
     this._fwdB = fwdB; this._sideB = sideB;
+    this._shoreDir = new THREE.Vector2(sideB.x, sideB.z);
+    this._shoreAt = 46 * (opts.port.berth?.scale ?? 1);
 
     // The wind blows across the approach rather than straight down it, so
     // there is a real sailing problem in getting alongside.
@@ -398,7 +401,13 @@ export class Voyage {
     this.sun.target.updateMatrixWorld();
 
     this.ocean.update(this.t, this.pos, this.camera, { ...p, sunDir: this.sky.sunDir },
-      { kn: this.windKn, fromDeg: this.windFrom });
+      {
+        kn: this.windKn, fromDeg: this.windFrom,
+        // The harbour builds its land along +sideB, so that is "toward the
+        // shore" and the beach sits a fixed distance along it.
+        shoreDir: this._shoreDir,
+        shoreAt: this._shoreAt,
+      });
     this.harbour.update(this.t, night);
 
     const aligned = angleDiff(this.heading, this.berthHeading) < 60;

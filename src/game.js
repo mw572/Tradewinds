@@ -474,6 +474,7 @@ function startVoyage() {
     state.voyage.start({
       port: dest,
       shipSpec: {
+        era: h.eraId,
         type: h.ship.type, masts: h.ship.masts, rig: h.ship.rig,
         armed: h.ship.armed, condition: h.ship.condition,
         speedKn: effectiveSpeed(h.ship),
@@ -496,12 +497,33 @@ function flashHelm(msg) {
   helmTimer = setTimeout(() => el.classList.remove("show"), 2600);
 }
 
+// The helm instruments are named for the age. A steamer has no point of sail
+// and a container ship has no canvas.
+const HELM_LABELS = {
+  sail:  { pos: "Point of sail", trim: "Canvas", key: "canvas", dock: "SPACE make fast" },
+  steam: { pos: "Engine", trim: "Revolutions", key: "telegraph", dock: "SPACE ring off" },
+  box:   { pos: "Engine", trim: "Power", key: "throttle", dock: "SPACE all fast" },
+};
+const ENGINE_STATE = (frac) =>
+  frac < 0.05 ? "Stopped" : frac < 0.28 ? "Dead slow" : frac < 0.5 ? "Slow ahead"
+  : frac < 0.72 ? "Half ahead" : frac < 0.92 ? "Full ahead" : "Full sea speed";
+
 function updateHud(d) {
   $("i-heading").textContent = String(d.headingDeg).padStart(3, "0") + "°";
   $("i-speed").textContent = d.speedKn.toFixed(1) + " kn";
+  const era = state.house?.eraId || "sail";
+  const lab = HELM_LABELS[era];
+  document.querySelector('.inst:nth-child(3) .inst-label').textContent = lab.pos;
+  document.querySelector('.inst:nth-child(4) .inst-label').textContent = lab.trim;
+  $("key-trim").innerHTML = "\u25B2/\u25BC " + lab.key;
+  $("key-dock").textContent = lab.dock;
+  $("dock-prompt").innerHTML = era === "sail"
+    ? "Press <b>SPACE</b> to make fast"
+    : era === "steam" ? "Ring off <b>SPACE</b> and make fast alongside"
+    : "<b>SPACE</b> to declare all fast";
   const pos = $("i-pos");
-  pos.textContent = d.pointOfSail;
-  pos.classList.toggle("alarm", d.inIrons);
+  pos.textContent = era === "sail" ? d.pointOfSail : ENGINE_STATE(d.trim);
+  pos.classList.toggle("alarm", era === "sail" && d.inIrons);
   $("i-trim").textContent = Math.round(d.trim * 100) + "%";
   $("i-dist").textContent = d.distM.toLocaleString() + " m";
   $("hud-progress").style.width = Math.round(d.progress * 100) + "%";

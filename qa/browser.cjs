@@ -72,6 +72,22 @@ const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name) });
   check(/Tramp Steamer/.test(steamHulls), 'steamers are for sale');
   await shot(page, '11-steam-era.png');
 
+  // The steamer must actually be a different vessel, not the caravel reskinned.
+  await page.click('.tab[data-tab="chart"]'); await page.waitForTimeout(200);
+  await page.locator('#chart .port-g[data-port="porto"]').click(); await page.waitForTimeout(150);
+  await page.click('#sail-btn');
+  await page.waitForSelector('#voyage-screen.active', { timeout: 6000 });
+  await page.waitForTimeout(2600);
+  const steamShip = await page.evaluate(() => {
+    const s = window.__tw.state.voyage.ship3d;
+    return { era: s.era, sails: s.sails.length, smoke: !!s.smoke, len: Math.round(s.len) };
+  });
+  check(steamShip.era === 'steam', `the helm builds a steam vessel (${steamShip.era})`);
+  check(steamShip.sails === 0, 'she carries no canvas');
+  check(steamShip.smoke, 'and she makes smoke');
+  check(/Engine/.test(await page.textContent('.inst:nth-child(3) .inst-label')), 'the instruments read Engine, not Point of sail');
+  check(/telegraph/.test(await page.textContent('#key-trim')), 'and the controls say telegraph');
+
   // And a Box campaign, which uses a different currency entirely.
   await page.goto(BASE, { waitUntil: 'networkidle' });
   await page.waitForTimeout(300);
@@ -87,6 +103,20 @@ const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name) });
   const boxGoods = await page.locator('#market-rows tr').allTextContents();
   check(boxGoods.some((t) => /Electronics/.test(t)), 'boxed cargo is on the exchange');
   await shot(page, '12-box-era.png');
+
+  await page.click('.tab[data-tab="chart"]'); await page.waitForTimeout(200);
+  await page.locator('#chart .port-g[data-port="porto"]').click(); await page.waitForTimeout(150);
+  await page.click('#sail-btn');
+  await page.waitForSelector('#voyage-screen.active', { timeout: 6000 });
+  await page.waitForTimeout(2600);
+  const boxShip = await page.evaluate(() => {
+    const s = window.__tw.state.voyage.ship3d;
+    return { era: s.era, boxes: s.boxCount || 0, sails: s.sails.length, len: Math.round(s.len) };
+  });
+  check(boxShip.era === 'box', `the helm builds a container ship (${boxShip.era})`);
+  check(boxShip.boxes > 60, `she is loaded with containers (${boxShip.boxes})`);
+  check(boxShip.sails === 0, 'and carries no canvas');
+  check(boxShip.len > steamShip.len, `she is longer than the steamer (${boxShip.len} vs ${steamShip.len})`);
 
   // Back to Sail for the rest of the run.
   await page.goto(BASE, { waitUntil: 'networkidle' });

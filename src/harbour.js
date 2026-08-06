@@ -192,7 +192,7 @@ export class Harbour {
     this.group.add(jib);
 
     /* ---------------------------- the town ---------------------------- */
-    const count = { city: 26, river: 20, fortress: 16, island: 11, kasbah: 18, reef: 14 }[spec.style] || 16;
+    const count = { city: 78, river: 62, fortress: 46, island: 30, kasbah: 54, reef: 40 }[spec.style] || 46;
     for (let i = 0; i < count; i++) {
       const w = (9 + rnd() * 13) * S;
       const d = (9 + rnd() * 12) * S;
@@ -212,12 +212,33 @@ export class Harbour {
       b.castShadow = true; b.receiveShadow = true;
       this.group.add(b);
 
-      // Pitched roof
-      const r = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w, d) * 0.76, 4.2 * S, 4), mat.roof);
-      r.position.copy(b.position).setY(b.position.y + h / 2 + 2.1 * S);
-      r.rotation.y = b.rotation.y + Math.PI / 4;
+      // Gable roof: a prism, not a pyramid. Real terraces have ridges running
+      // one way, and a street of four-sided pyramids reads as a tent village.
+      const gable = rnd() < 0.72;
+      let r;
+      if (gable) {
+        const ridge = new THREE.CylinderGeometry(Math.max(w, d) * 0.62, Math.max(w, d) * 0.62, Math.max(w, d) * 1.02, 3);
+        ridge.rotateZ(Math.PI / 2);
+        r = new THREE.Mesh(ridge, mat.roof);
+        r.scale.set(1, 1, 0.62);
+        r.rotation.y = b.rotation.y + (w > d ? 0 : Math.PI / 2);
+      } else {
+        r = new THREE.Mesh(new THREE.ConeGeometry(Math.max(w, d) * 0.74, 3.4 * S, 4), mat.roof);
+        r.rotation.y = b.rotation.y + Math.PI / 4;
+      }
+      r.position.copy(b.position).setY(b.position.y + h / 2 + 1.4 * S);
       r.castShadow = true;
       this.group.add(r);
+
+      // A chimney or two, which is most of what makes a roofline read as lived in.
+      if (rnd() < 0.6) {
+        const ch = new THREE.Mesh(
+          new THREE.BoxGeometry(0.9 * S, 2.4 * S, 0.9 * S), mat.walls[0]);
+        ch.position.copy(b.position)
+          .setY(b.position.y + h / 2 + 2.2 * S)
+          .add(new THREE.Vector3((rnd() - 0.5) * w * 0.5, 0, (rnd() - 0.5) * d * 0.5));
+        this.group.add(ch);
+      }
 
       // A lit window or two after dark
       if (rnd() < 0.5) {
@@ -226,6 +247,72 @@ export class Harbour {
         this.group.add(win);
         this.lights.push({ light: win, peak: 0.9 + rnd() * 0.8 });
       }
+    }
+
+    /* ------------------------------- planting -------------------------------
+     * Bare terrain reads as a golf course. Trees give the hillside scale and
+     * break up the vertex colouring, and they cost one instanced draw call. */
+    {
+      const TREES = { island: 90, reef: 110, kasbah: 40 }[spec.style] ?? 190;
+      const trunkGeo = new THREE.CylinderGeometry(0.34 * S, 0.5 * S, 3.2 * S, 5);
+      const crownGeo = new THREE.IcosahedronGeometry(2.6 * S, 0);
+      const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3524, roughness: 0.95 });
+      const crownMat = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(pal.land).multiplyScalar(0.82), roughness: 0.95, flatShading: true });
+      const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, TREES);
+      const crowns = new THREE.InstancedMesh(crownGeo, crownMat, TREES);
+      crowns.castShadow = true;
+      const m = new THREE.Matrix4(), q = new THREE.Quaternion();
+      const sc = new THREE.Vector3(), pos = new THREE.Vector3();
+      const cCol = new THREE.Color();
+      let placed = 0;
+      for (let i = 0; i < TREES * 4 && placed < TREES; i++) {
+        const along = (rnd() - 0.5) * 620 * S;
+        const off = (70 + rnd() * 380) * S;
+        const g = groundAt(along, off);
+        if (g < 4 * S) continue;                    // not on the beach
+        const near = Math.hypot(along / S, off / S);
+        if (near < 90) continue;                    // not on the quay
+        const h = 0.7 + rnd() * 0.7;
+        pos.copy(at(along, off, g + 1.4 * S * h));
+        sc.set(h, h, h);
+        m.compose(pos, q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rnd() * 6.28), sc);
+        trunks.setMatrixAt(placed, m);
+        pos.setY(g + 4.2 * S * h);
+        m.compose(pos, q, sc.set(h * (0.8 + rnd() * 0.4), h * (0.9 + rnd() * 0.5), h));
+        crowns.setMatrixAt(placed, m);
+        crowns.setColorAt(placed, cCol.setHSL(0.25 + rnd() * 0.06, 0.32 + rnd() * 0.2, 0.20 + rnd() * 0.12));
+        placed++;
+      }
+      trunks.count = placed; crowns.count = placed;
+      trunks.instanceMatrix.needsUpdate = true;
+      crowns.instanceMatrix.needsUpdate = true;
+      if (crowns.instanceColor) crowns.instanceColor.needsUpdate = true;
+      this.group.add(trunks); this.group.add(crowns);
+    }
+
+    // Rocks where the ground meets the water.
+    {
+      const rockGeo = new THREE.DodecahedronGeometry(2.0 * S, 0);
+      const rocks = new THREE.InstancedMesh(rockGeo, mat.stone, 70);
+      const m = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3();
+      let n = 0;
+      for (let i = 0; i < 300 && n < 70; i++) {
+        const along = (rnd() - 0.5) * 560 * S;
+        const off = (40 + rnd() * 90) * S;
+        const g = groundAt(along, off);
+        if (g < -3 * S || g > 6 * S) continue;      // only in the wash
+        if (Math.hypot(along / S, off / S) < 80) continue;
+        const h = 0.4 + rnd() * 0.9;
+        m.compose(at(along, off, g + 0.4 * S),
+          q.setFromAxisAngle(new THREE.Vector3(rnd(), rnd(), rnd()).normalize(), rnd() * 6.28),
+          sc.set(h, h * 0.6, h));
+        rocks.setMatrixAt(n++, m);
+      }
+      rocks.count = n;
+      rocks.instanceMatrix.needsUpdate = true;
+      rocks.castShadow = true;
+      this.group.add(rocks);
     }
 
     /* ------------------------- landmark per style ------------------------- */

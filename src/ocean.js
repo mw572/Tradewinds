@@ -163,6 +163,9 @@ const FRAG = /* glsl */ `
   uniform vec2  uWindDir;      // unit vector the wind blows TOWARDS
   uniform float uWindStr;      // 0 calm .. 1 hard
   uniform float uTime2;
+  uniform vec3  uShoal;        // colour of shallow water over sand
+  uniform vec2  uShoreDir;     // unit vector pointing from the sea toward the land
+  uniform float uShoreAt;      // distance along uShoreDir where the beach is
 
   varying vec3  vWorld;
   varying vec3  vNormal;
@@ -196,9 +199,21 @@ const FRAG = /* glsl */ `
     float lift = smoothstep(-0.5, 2.4, vHeight);
     body += uShallow * back * lift * 0.42;
 
+    // Shoaling: as the bottom comes up the water goes from deep blue through
+    // turquoise to pale sand. This is the thing that makes a coast read as a
+    // coast rather than a green cut-out standing in a blue plane.
+    float toShore = dot(vWorld.xz, uShoreDir);
+    float depth = clamp((uShoreAt - toShore) / 420.0, 0.0, 1.0);
+    float shoal = 1.0 - smoothstep(0.0, 0.62, depth);
+    body = mix(body, uShoal, shoal * 0.86);
+
     // Sky reflection, cheap: tint by how much sky the normal can see.
     vec3 reflected = mix(uHorizon, uSkyTint, clamp(N.y, 0.0, 1.0));
     vec3 col = mix(body, reflected, fres * 0.82);
+
+    // Surf: a band of broken water where the swell feels the bottom.
+    float surf = smoothstep(0.82, 0.99, shoal) * (0.55 + 0.45 * sin(uTime2 * 1.6 + toShore * 0.06));
+    col = mix(col, vec3(0.94, 0.97, 0.97), clamp(surf, 0.0, 1.0) * 0.7);
 
     // Sun glitter. Two lobes: a tight specular and a broad sheen.
     vec3 H = normalize(L + V);
@@ -277,6 +292,9 @@ export class Ocean {
       uWindDir:    { value: new THREE.Vector2(1, 0) },
       uWindStr:    { value: 0.5 },
       uTime2:      { value: 0 },
+      uShoal:      { value: new THREE.Color(0x3fa8a0) },
+      uShoreDir:   { value: new THREE.Vector2(0, 1) },
+      uShoreAt:    { value: 1e6 },
     };
 
     this.mesh = new THREE.Mesh(geo, new THREE.ShaderMaterial({
@@ -329,6 +347,10 @@ export class Ocean {
     }
     this._wake = this._wake.filter((w) => t - w.born < WAKE_LIFE);
 
+    if (wind && wind.shoreDir) {
+      this.uniforms.uShoreDir.value.copy(wind.shoreDir);
+      this.uniforms.uShoreAt.value = wind.shoreAt;
+    }
     if (palette) {
       this.uniforms.uSun.value.copy(palette.sunDir);
       this.uniforms.uSunColor.value.copy(palette.sunColor);
@@ -336,6 +358,7 @@ export class Ocean {
       this.uniforms.uHorizon.value.copy(palette.horizon);
       this.uniforms.uDeep.value.copy(palette.deep);
       this.uniforms.uShallow.value.copy(palette.shallow);
+      this.uniforms.uShoal.value.copy(palette.shallow).lerp(new THREE.Color(0x8fd6c4), 0.55);
     }
   }
 }
