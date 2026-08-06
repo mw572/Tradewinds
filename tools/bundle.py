@@ -22,6 +22,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Dependency order. Anything importing a module must come after it.
 MODULES = [
+    "eras.js",
     "world.js",
     "coastline.js",
     "economy.js",
@@ -129,8 +130,44 @@ def wrap_three(src):
     ), len(names)
 
 
+def verify_complete(src_dir):
+    """Every module imported by a bundled module must itself be bundled.
+
+    Without this, forgetting an entry in MODULES produces a bundle that
+    references an undefined `__name` and throws on load — while the dev server,
+    which loads the real ES modules, keeps working. That gap shipped once.
+    """
+    listed = {m.replace(".js", "") for m in MODULES}
+    missing = []
+    for name in MODULES:
+        src = open(os.path.join(src_dir, name)).read()
+        for m in IMPORT_RE.finditer(src):
+            target = m.group("src")
+            if target == "three":
+                continue
+            key = module_key(target)
+            if key not in listed:
+                missing.append(f"{name} imports {target}, which is not in MODULES")
+    if missing:
+        sys.exit("bundle: incomplete module list\n  " + "\n  ".join(missing))
+
+    # And the order has to be a valid topological one.
+    seen = set()
+    for name in MODULES:
+        src = open(os.path.join(src_dir, name)).read()
+        for m in IMPORT_RE.finditer(src):
+            target = m.group("src")
+            if target == "three":
+                continue
+            key = module_key(target)
+            if key not in seen:
+                sys.exit(f"bundle: {name} imports {target} before it is defined; reorder MODULES")
+        seen.add(module_key(name))
+
+
 def main():
     src_dir = os.path.join(ROOT, "src")
+    verify_complete(src_dir)
     out_dir = os.path.join(ROOT, "dist")
     os.makedirs(out_dir, exist_ok=True)
 
