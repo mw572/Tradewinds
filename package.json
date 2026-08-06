@@ -1,0 +1,13 @@
+{
+  "name": "tradewinds",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "An Age-of-Sail merchant trading game. Plain ES modules, no build step.",
+  "scripts": {
+    "serve": "python3 -m http.server 8749",
+    "test": "node qa/unit.js && node qa/sim.js",
+    "test:browser": "node qa/browser.js",
+    "test:all": "node qa/unit.js && node qa/sim.js && node qa/browser.js"
+  }
+}

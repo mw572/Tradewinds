@@ -1,47 +1,49 @@
-// sailing.js — the 3-D helm. A Gerstner-wave ocean, a caravel you steer with
-// real inertia and point-of-sail physics, and a berth you must bring her into
-// slowly and squarely. Three.js, no build step.
+// sailing.js — the helm. Scene assembly, ship physics, docking.
+//
+// The sailing model is the part worth getting right, because it is the only
+// place in the game where you are not looking at a table of numbers:
+//
+//  - you cannot sail into the wind. Inside about 30 degrees the sails luff and
+//    she stalls, and the only way out is to bear away and build speed first
+//  - a beam reach is fastest; running dead downwind is not
+//  - the rudder only bites when there is water flowing past it, so a stalled
+//    ship will not answer her helm
+//  - she carries her way. Momentum is the whole difficulty of docking
+//
+// Everything else here is presentation: sky, ocean, harbour, camera.
+
 import * as THREE from "three";
-
-// Wave field shared between the GPU (vertex shader) and the CPU (ship bob).
-// phase = dot(dir, worldXZ) * freq + time * speed ; y += amp * sin(phase)
-const WAVES = [
-  { dir: [1.0, 0.15], amp: 1.6, freq: 0.011, speed: 0.55, q: 0.30 },
-  { dir: [0.6, 0.8], amp: 1.0, freq: 0.020, speed: 0.80, q: 0.35 },
-  { dir: [-0.5, 0.85], amp: 0.5, freq: 0.035, speed: 1.15, q: 0.40 },
-  { dir: [0.25, -1.0], amp: 0.25, freq: 0.060, speed: 1.6, q: 0.45 },
-];
-
-function normDir([x, z]) { const l = Math.hypot(x, z) || 1; return [x / l, z / l]; }
-const WDIR = WAVES.map((w) => normDir(w.dir));
-
-// CPU-side height sample (matches the shader) so the hull rides the swell.
-function waveHeight(x, z, t) {
-  let y = 0;
-  for (let i = 0; i < WAVES.length; i++) {
-    const w = WAVES[i], d = WDIR[i];
-    const phase = (d[0] * x + d[1] * z) * w.freq + t * w.speed;
-    y += w.amp * Math.sin(phase);
-  }
-  return y;
-}
+import { Ocean, gerstner, waveNormal } from "./ocean.js";
+import { Sky } from "./sky.js";
+import { Ship3D, Wake } from "./ship3d.js";
+import { Harbour } from "./harbour.js";
 
 const DEG = Math.PI / 180;
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-function angleDiff(a, b) { let d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; }
 
-// Sail power vs true wind angle (0 = pointing into wind, 180 = dead downwind).
-function sailPower(twa) {
-  if (twa < 32) return clamp((twa - 8) / 24, 0, 1) * 0.28;   // in irons → luffing
-  if (twa < 55) return 0.28 + (twa - 32) / 23 * 0.5;         // close-hauled
-  if (twa < 105) return 0.78 + (twa - 55) / 50 * 0.22;       // reaching → best
-  if (twa < 150) return 1.0 - (twa - 105) / 45 * 0.12;       // broad reach
-  return 0.88 - (twa - 150) / 30 * 0.16;                     // running
+/** Smallest absolute angle between two compass bearings. */
+export function angleDiff(a, b) {
+  const d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
 }
-function pointOfSailName(twa) {
-  if (twa < 32) return "In irons";
+
+/**
+ * Sail power against the true wind angle. 0 is head to wind, 180 dead downwind.
+ * The classic polar: nothing in irons, climbing hard through close-hauled,
+ * peaking on a beam reach, easing off as you bear away.
+ */
+export function sailPower(twa) {
+  if (twa < 30) return clamp((twa - 6) / 24, 0, 1) * 0.22;      // luffing
+  if (twa < 55) return 0.22 + ((twa - 30) / 25) * 0.56;         // close-hauled
+  if (twa < 100) return 0.78 + ((twa - 55) / 45) * 0.22;        // reaching, best
+  if (twa < 150) return 1.0 - ((twa - 100) / 50) * 0.14;        // broad reach
+  return 0.86 - ((twa - 150) / 30) * 0.18;                      // running
+}
+
+export function pointOfSail(twa) {
+  if (twa < 30) return "In irons";
   if (twa < 55) return "Close-hauled";
-  if (twa < 105) return "Beam reach";
+  if (twa < 100) return "Beam reach";
   if (twa < 150) return "Broad reach";
   return "Running";
 }
@@ -49,364 +51,326 @@ function pointOfSailName(twa) {
 export class Voyage {
   constructor(canvas) {
     this.canvas = canvas;
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
+    this.renderer = new THREE.WebGLRenderer({
+      canvas, antialias: true, powerPreference: "high-performance", alpha: false,
+    });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.Fog(0x1a3a48, 900, 2600);
-    this.camera = new THREE.PerspectiveCamera(55, 1, 1, 6000);
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-    this._buildSky();
-    this._buildOcean();
-    this._buildShip();
-    this._buildLights();
+    this.scene = new THREE.Scene();
+    this.camera = new THREE.PerspectiveCamera(52, 1, 0.8, 12000);
+
+    this.sky = new Sky();
+    this.scene.add(this.sky.mesh);
+
+    this.ocean = new Ocean();
+    this.scene.add(this.ocean.mesh);
+
+    this.hemi = new THREE.HemisphereLight(0xbcd7e0, 0x0d2530, 0.85);
+    this.scene.add(this.hemi);
+    this.sun = new THREE.DirectionalLight(0xfff0d0, 1.6);
+    this.sun.castShadow = true;
+    this.sun.shadow.mapSize.set(1024, 1024);
+    const sc = this.sun.shadow.camera;
+    sc.near = 1; sc.far = 500; sc.left = -100; sc.right = 100; sc.top = 100; sc.bottom = -100;
+    this.scene.add(this.sun);
+    this.scene.add(this.sun.target);
+
+    this.wake = new Wake(110);
+    this.scene.add(this.wake.mesh);
+
+    this.ship3d = null;
+    this.harbour = null;
 
     this.keys = new Set();
     this._onKeyDown = (e) => {
       const k = e.key;
       if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(k)) e.preventDefault();
-      if (k === " ") { if (this.dockable && this.onArrive) this.onArrive(); return; }
+      if (k === " ") { this._tryDock(); return; }
+      if (k === "c" || k === "C") { this.camMode = (this.camMode + 1) % 3; return; }
       this.keys.add(k);
     };
     this._onKeyUp = (e) => this.keys.delete(e.key);
     this._onResize = () => this._resize();
+    this._onBlur = () => this.keys.clear();
 
+    // Touch: drag anywhere to steer and trim.
+    this._touch = { active: false, x0: 0, y0: 0 };
+    this._onTouchStart = (e) => {
+      const t = e.touches[0]; if (!t) return;
+      this._touch = { active: true, x0: t.clientX, y0: t.clientY };
+    };
+    this._onTouchMove = (e) => {
+      if (!this._touch.active) return;
+      const t = e.touches[0]; if (!t) return;
+      e.preventDefault();
+      this.touchRudder = clamp((t.clientX - this._touch.x0) / 90, -1, 1);
+      this.touchTrim = clamp(-(t.clientY - this._touch.y0) / 120, -1, 1);
+    };
+    this._onTouchEnd = () => { this._touch.active = false; this.touchRudder = 0; this.touchTrim = 0; };
+
+    this.touchRudder = 0;
+    this.touchTrim = 0;
+    this.camMode = 0;
     this.running = false;
     this.clock = new THREE.Clock();
+    this._tmp = { x: 0, y: 0, z: 0 };
   }
 
-  _buildLights() {
-    this.scene.add(new THREE.HemisphereLight(0xbcd7e0, 0x0a2028, 0.9));
-    const sun = new THREE.DirectionalLight(0xfff0d0, 1.15);
-    this.sunDir = new THREE.Vector3(-0.4, 0.7, 0.55).normalize();
-    sun.position.copy(this.sunDir).multiplyScalar(500);
-    this.scene.add(sun);
-  }
+  /* ---------------------------------------------------------- lifecycle -- */
 
-  _buildSky() {
-    // vertical gradient backdrop
-    const c = document.createElement("canvas");
-    c.width = 8; c.height = 256;
-    const g = c.getContext("2d");
-    const grad = g.createLinearGradient(0, 0, 0, 256);
-    grad.addColorStop(0.0, "#0b2a3c");
-    grad.addColorStop(0.55, "#2b6076");
-    grad.addColorStop(0.78, "#8fb2b8");
-    grad.addColorStop(1.0, "#d8cba0");
-    g.fillStyle = grad; g.fillRect(0, 0, 8, 256);
-    const tex = new THREE.CanvasTexture(c);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    this.scene.background = tex;
-  }
-
-  _buildOcean() {
-    const SIZE = 5000, SEG = 200;
-    const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
-    geo.rotateX(-Math.PI / 2);
-
-    const waveDirs = WDIR.flat();
-    const uniforms = {
-      uTime: { value: 0 },
-      uCenter: { value: new THREE.Vector2(0, 0) },
-      uSun: { value: this.sunDir ? this.sunDir.clone() : new THREE.Vector3(-0.4, 0.7, 0.55).normalize() },
-      uCam: { value: new THREE.Vector3() },
-      uDeep: { value: new THREE.Color(0x0a3446) },
-      uShallow: { value: new THREE.Color(0x2a7d84) },
-      uSky: { value: new THREE.Color(0x9fc0c4) },
-      uAmp: { value: WAVES.map((w) => w.amp) },
-      uFreq: { value: WAVES.map((w) => w.freq) },
-      uSpeed: { value: WAVES.map((w) => w.speed) },
-      uDir: { value: waveDirs },
-    };
-    this.oceanUniforms = uniforms;
-
-    const mat = new THREE.ShaderMaterial({
-      uniforms,
-      vertexShader: `
-        uniform float uTime;
-        uniform vec2 uCenter;
-        uniform float uAmp[4];
-        uniform float uFreq[4];
-        uniform float uSpeed[4];
-        uniform float uDir[8];
-        varying vec3 vWorld;
-        varying vec3 vNormal;
-        float wy(vec2 p){
-          float y = 0.0;
-          for(int i=0;i<4;i++){
-            vec2 d = vec2(uDir[i*2], uDir[i*2+1]);
-            float ph = dot(d,p)*uFreq[i] + uTime*uSpeed[i];
-            y += uAmp[i]*sin(ph);
-          }
-          return y;
-        }
-        void main(){
-          vec2 wp = position.xz + uCenter;
-          float e = 2.0;
-          float h  = wy(wp);
-          float hR = wy(wp+vec2(e,0.0));
-          float hU = wy(wp+vec2(0.0,e));
-          vNormal = normalize(vec3(h-hR, e, h-hU));
-          vec3 pos = vec3(position.x, h, position.z);
-          vWorld = vec3(wp.x, h, wp.y);
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(pos,1.0);
-        }
-      `,
-      fragmentShader: `
-        precision highp float;
-        uniform vec3 uSun; uniform vec3 uCam;
-        uniform vec3 uDeep; uniform vec3 uShallow; uniform vec3 uSky;
-        varying vec3 vWorld; varying vec3 vNormal;
-        void main(){
-          vec3 N = normalize(vNormal);
-          vec3 V = normalize(uCam - vWorld);
-          float fres = pow(1.0 - max(dot(N,V),0.0), 3.0);
-          float diff = clamp(dot(N, normalize(uSun))*0.5+0.5, 0.0, 1.0);
-          float crest = smoothstep(0.6, 2.2, vWorld.y);
-          vec3 water = mix(uDeep, uShallow, diff);
-          water = mix(water, uSky, fres*0.6);
-          water += crest * 0.25;
-          vec3 H = normalize(normalize(uSun)+V);
-          float spec = pow(max(dot(N,H),0.0), 120.0);
-          water += spec * vec3(1.0,0.95,0.8) * 0.8;
-          float dist = length(uCam.xz - vWorld.xz);
-          water = mix(water, vec3(0.55,0.66,0.62), clamp((dist-1400.0)/1600.0,0.0,0.45));
-          gl_FragColor = vec4(water, 1.0);
-        }
-      `,
-    });
-    this.ocean = new THREE.Mesh(geo, mat);
-    this.scene.add(this.ocean);
-  }
-
-  _buildShip() {
-    const ship = new THREE.Group();
-    const wood = new THREE.MeshStandardMaterial({ color: 0x5c3d22, roughness: 0.85 });
-    const woodLt = new THREE.MeshStandardMaterial({ color: 0x7a5330, roughness: 0.8 });
-    const trim = new THREE.MeshStandardMaterial({ color: 0x3a2716, roughness: 0.9 });
-
-    const hull = new THREE.Mesh(new THREE.BoxGeometry(5.4, 2.8, 14), wood);
-    hull.position.y = 0.4; ship.add(hull);
-
-    // pointed bow (a low 4-sided prism) at -Z
-    const bow = new THREE.Mesh(new THREE.ConeGeometry(2.9, 6, 4), wood);
-    bow.rotation.x = -Math.PI / 2; bow.rotation.z = Math.PI / 4;
-    bow.position.set(0, 0.4, -9.5); ship.add(bow);
-
-    const deck = new THREE.Mesh(new THREE.BoxGeometry(4.8, 0.5, 12.5), woodLt);
-    deck.position.y = 1.9; ship.add(deck);
-
-    const aft = new THREE.Mesh(new THREE.BoxGeometry(4.8, 2.6, 3.4), woodLt);
-    aft.position.set(0, 3.0, 5.2); ship.add(aft);
-
-    const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.34, 17, 8), trim);
-    mast.position.set(0, 9, -1); ship.add(mast);
-    const boom = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 12, 6), trim);
-    boom.rotation.x = Math.PI / 2; boom.position.set(0, 5.5, -1); ship.add(boom);
-
-    // sail with a red cross (a nod to the age of Portuguese sail)
-    const sc = document.createElement("canvas");
-    sc.width = 128; sc.height = 160;
-    const sg = sc.getContext("2d");
-    sg.fillStyle = "#efe7d2"; sg.fillRect(0, 0, 128, 160);
-    sg.fillStyle = "#b23a2e";
-    sg.fillRect(52, 20, 24, 120); sg.fillRect(20, 58, 88, 24);
-    const stex = new THREE.CanvasTexture(sc);
-    stex.colorSpace = THREE.SRGBColorSpace;
-    const sailMat = new THREE.MeshStandardMaterial({ map: stex, side: THREE.DoubleSide, roughness: 0.95 });
-    const sail = new THREE.Mesh(new THREE.PlaneGeometry(11, 12, 6, 4), sailMat);
-    sail.position.set(0, 9, -1.1);
-    // gentle belly in the sail
-    const pos = sail.geometry.attributes.position;
-    for (let i = 0; i < pos.count; i++) {
-      const x = pos.getX(i);
-      pos.setZ(i, -Math.cos((x / 11) * Math.PI) * 1.1 - 1.0);
-    }
-    sail.geometry.computeVertexNormals();
-    ship.add(sail);
-    this.sail = sail;
-
-    this.ship = ship;
-    this.scene.add(ship);
-  }
-
-  _buildHarbour(berthPos, berthHeadingDeg) {
-    if (this.harbour) this.scene.remove(this.harbour);
-    const h = new THREE.Group();
-    const hRad = berthHeadingDeg * DEG;
-    const fwd = new THREE.Vector3(Math.sin(hRad), 0, -Math.cos(hRad));  // along berth
-    const side = new THREE.Vector3(fwd.z, 0, -fwd.x);                   // to starboard of berth
-
-    const stone = new THREE.MeshStandardMaterial({ color: 0x6b6156, roughness: 1 });
-    const land = new THREE.MeshStandardMaterial({ color: 0x53603f, roughness: 1 });
-    const roof = new THREE.MeshStandardMaterial({ color: 0x7a4b34, roughness: 1 });
-    const wallM = new THREE.MeshStandardMaterial({ color: 0xcbb58c, roughness: 1 });
-
-    // landmass behind the pier
-    const landMesh = new THREE.Mesh(new THREE.BoxGeometry(340, 40, 340), land);
-    const landCenter = new THREE.Vector3().copy(berthPos).addScaledVector(side, 190).setY(-16);
-    landMesh.position.copy(landCenter); h.add(landMesh);
-
-    // stone pier alongside the berth
-    const pier = new THREE.Mesh(new THREE.BoxGeometry(9, 6, 70), stone);
-    pier.position.copy(berthPos).addScaledVector(side, 9).setY(1);
-    pier.rotation.y = -hRad; h.add(pier);
-
-    // mooring posts
-    for (const s of [-18, 18]) {
-      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.9, 5, 8), stone);
-      post.position.copy(berthPos).addScaledVector(fwd, s).addScaledVector(side, 4).setY(2);
-      h.add(post);
-    }
-    // a few buildings + a tower for a skyline
-    for (let i = 0; i < 6; i++) {
-      const w = 10 + (i % 3) * 5;
-      const b = new THREE.Mesh(new THREE.BoxGeometry(w, 12 + (i % 4) * 5, w), wallM);
-      b.position.copy(berthPos)
-        .addScaledVector(side, 45 + (i % 3) * 30)
-        .addScaledVector(fwd, -60 + i * 24).setY(6);
-      h.add(b);
-      const r = new THREE.Mesh(new THREE.ConeGeometry(w * 0.8, 7, 4), roof);
-      r.position.copy(b.position).setY(b.position.y + 9); r.rotation.y = Math.PI / 4;
-      h.add(r);
-    }
-    const tower = new THREE.Mesh(new THREE.CylinderGeometry(4, 5, 34, 12), wallM);
-    tower.position.copy(berthPos).addScaledVector(side, 60).addScaledVector(fwd, 40).setY(17);
-    h.add(tower);
-
-    // berth zone marker on the water
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(6, this.berthRadius, 40),
-      new THREE.MeshBasicMaterial({ color: 0x6fbf8e, transparent: true, opacity: 0.28, side: THREE.DoubleSide })
-    );
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.copy(berthPos).setY(0.6);
-    h.add(ring);
-    this.berthRing = ring;
-
-    this.harbour = h;
-    this.scene.add(h);
-  }
-
+  /**
+   * opts: { port, shipSpec, windDeg, windKn, legNm, dayFraction,
+   *         onHud, onDockable, onArrive, onMessage }
+   */
   start(opts) {
-    // opts: { destName, windDeg, legUnits, onHud, onDockable, onArrive }
+    this.opts = opts;
     this.onHud = opts.onHud;
     this.onDockableCb = opts.onDockable;
     this.onArrive = opts.onArrive;
-    this.destName = opts.destName;
 
-    this.windFrom = opts.windDeg;                 // compass deg the wind blows FROM
-    this.berthRadius = 20;
+    // Only rebuild the ship when the hull actually changed.
+    const specKey = JSON.stringify([opts.shipSpec?.type, opts.shipSpec?.masts, opts.shipSpec?.armed,
+      Math.round((opts.shipSpec?.condition ?? 1) * 4)]);
+    if (this._specKey !== specKey) {
+      if (this.ship3d) { this.scene.remove(this.ship3d.group); this.ship3d.dispose(); }
+      this.ship3d = new Ship3D(opts.shipSpec || {});
+      this.scene.add(this.ship3d.group);
+      this._specKey = specKey;
+    }
+
+    if (this.harbour) { this.scene.remove(this.harbour.group); this.harbour.dispose(); }
     this.berth = new THREE.Vector3(0, 0, 0);
-    this.berthHeading = this.windFrom;            // moor bow-to-wind
-    this._buildHarbour(this.berth, this.berthHeading);
+    this.berthRadius = 26;
+    this.berthHeading = opts.windDeg;                 // moored bow to wind
+    this.harbour = new Harbour(opts.port, this.berth, this.berthHeading, this.berthRadius);
+    this.scene.add(this.harbour.group);
 
-    // start downwind of the berth so there's a real approach to sail
-    const startDist = clamp(520 + opts.legUnits * 34, 520, 1080);
-    const bearing = (this.windFrom + 180) * DEG;  // downwind side
-    this.pos = new THREE.Vector3(Math.sin(bearing) * startDist, 0, -Math.cos(bearing) * startDist);
+    this.windFrom = opts.windDeg;
+    this.windKn = opts.windKn ?? 14;
+    this.maxKn = Math.max(3, opts.shipSpec?.speedKn ?? 7);
 
-    // face roughly toward the berth to begin
+    // Start downwind of the berth and off to one side, so the run in is a
+    // reach rather than a beat. Starting on the direct downwind line would put
+    // her dead head-to-wind, which is in irons, which is unsailable.
+    const startDist = clamp(560 + (opts.legNm ?? 300) * 0.16, 560, 1250);
+    const side = Math.random() < 0.5 ? -1 : 1;
+    const b = (this.windFrom + 180 + side * 52) * DEG;
+    this.pos = new THREE.Vector3(Math.sin(b) * startDist, 0, -Math.cos(b) * startDist);
+
+    // Head roughly at the berth, but never inside the no-go zone.
     const toBerth = Math.atan2(this.berth.x - this.pos.x, -(this.berth.z - this.pos.z));
-    this.heading = (toBerth / DEG + 360) % 360;
-    this.speedKn = 2;
-    this.trim = 0.5;
+    let heading = ((toBerth / DEG) + 360) % 360;
+    if (angleDiff(heading, this.windFrom) < 52) {
+      // Bear away to the side she is already on, so the first thing the player
+      // sees is a drawing sail rather than a luffing one.
+      heading = (this.windFrom + side * 62 + 360) % 360;
+    }
+    this.heading = heading;
+    this.speedKn = 2.5;
+    this.trim = 0.55;
     this.rudder = 0;
-    this.prevDist = startDist;
     this.dockable = false;
     this.arrived = false;
     this.t = 0;
+    this.startDist = startDist;
+    this.bumped = -99;
+    this._look = null;
+
+    this.wake.clear();
+    this.sky.setTime(opts.dayFraction ?? 0.42, (this.windFrom + 140) % 360);
 
     window.addEventListener("keydown", this._onKeyDown, { passive: false });
     window.addEventListener("keyup", this._onKeyUp);
     window.addEventListener("resize", this._onResize);
+    window.addEventListener("blur", this._onBlur);
+    this.canvas.addEventListener("touchstart", this._onTouchStart, { passive: true });
+    this.canvas.addEventListener("touchmove", this._onTouchMove, { passive: false });
+    this.canvas.addEventListener("touchend", this._onTouchEnd);
+
     this._resize();
     this.running = true;
     this.clock.start();
     this._loop();
   }
 
+  stop() {
+    this.running = false;
+    if (this._raf) cancelAnimationFrame(this._raf);
+    window.removeEventListener("keydown", this._onKeyDown);
+    window.removeEventListener("keyup", this._onKeyUp);
+    window.removeEventListener("resize", this._onResize);
+    window.removeEventListener("blur", this._onBlur);
+    this.canvas.removeEventListener("touchstart", this._onTouchStart);
+    this.canvas.removeEventListener("touchmove", this._onTouchMove);
+    this.canvas.removeEventListener("touchend", this._onTouchEnd);
+    this.keys.clear();
+  }
+
   _resize() {
     const w = this.canvas.clientWidth || window.innerWidth;
     const h = this.canvas.clientHeight || window.innerHeight;
+    if (!w || !h) return;
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   }
 
+  /** Called by SPACE and by the on-screen dock button. */
+  dock() { this._tryDock(); }
+
+  _tryDock() {
+    if (this.arrived) return;
+    if (this.dockable) { this.arrived = true; this.onArrive?.({ clean: true }); return; }
+    const dist = Math.hypot(this.pos.x - this.berth.x, this.pos.z - this.berth.z);
+    let why = "Not close enough to the berth yet.";
+    if (dist < this.berthRadius && this.speedKn >= 1.4) why = "Too much way on. Spill the wind and come in slow.";
+    else if (dist < this.berthRadius) why = "Square her up with the berth before you make fast.";
+    this.opts?.onMessage?.(why);
+  }
+
+  /* ------------------------------------------------------------ physics -- */
+
   _update(dt) {
-    const maxKn = this.ship.speedKn;
+    const upKey = this.keys.has("ArrowUp") || this.keys.has("w");
+    const downKey = this.keys.has("ArrowDown") || this.keys.has("s");
+    const leftKey = this.keys.has("ArrowLeft") || this.keys.has("a");
+    const rightKey = this.keys.has("ArrowRight") || this.keys.has("d");
 
-    // controls
-    if (this.keys.has("ArrowUp")) this.trim = clamp(this.trim + dt * 0.8, 0, 1);
-    if (this.keys.has("ArrowDown")) this.trim = clamp(this.trim - dt * 0.8, 0, 1);
-    const wantRudder = (this.keys.has("ArrowLeft") ? -1 : 0) + (this.keys.has("ArrowRight") ? 1 : 0);
-    this.rudder += (wantRudder - this.rudder) * clamp(dt * 6, 0, 1);
+    if (upKey) this.trim = clamp(this.trim + dt * 0.75, 0, 1);
+    if (downKey) this.trim = clamp(this.trim - dt * 0.75, 0, 1);
+    if (Math.abs(this.touchTrim) > 0.25) this.trim = clamp(this.trim + this.touchTrim * dt * 0.75, 0, 1);
 
-    // point of sail
+    const wantRudder = clamp((leftKey ? -1 : 0) + (rightKey ? 1 : 0) + this.touchRudder, -1, 1);
+    this.rudder += (wantRudder - this.rudder) * clamp(dt * 5.5, 0, 1);
+
     const twa = angleDiff(this.heading, this.windFrom);
     const power = sailPower(twa);
-    const targetKn = this.trim * maxKn * power;
-    const accel = targetKn > this.speedKn ? 0.6 : 1.4;         // slows faster than she builds way
+    const windScale = clamp(this.windKn / 14, 0.55, 1.45);
+    const targetKn = this.trim * this.maxKn * power * windScale;
+
+    // She builds way slowly and loses it fast. That asymmetry is the game.
+    const accel = targetKn > this.speedKn ? 0.55 : 1.5;
     this.speedKn += (targetKn - this.speedKn) * clamp(dt * accel, 0, 1);
     this.speedKn = Math.max(0, this.speedKn);
 
-    // steering needs way on
-    const steerAuth = clamp(0.25 + this.speedKn / maxKn, 0, 1.1);
-    this.heading = (this.heading + this.rudder * 42 * steerAuth * dt + 360) % 360;
+    // The rudder needs water past it: stalled, she barely answers her helm.
+    // The 0.2 floor is deliberate. With no floor a ship caught head-to-wind can
+    // never turn out of it, because turning needs speed and speed needs turning,
+    // and the voyage becomes unwinnable. Sweeps and a backed sail would get her
+    // round in reality; this is the cheap stand-in for that.
+    const steerAuth = clamp(0.2 + this.speedKn / (this.maxKn * 0.5), 0, 1.15);
+    this.heading = (this.heading + this.rudder * 40 * steerAuth * dt + 360) % 360;
 
-    // translate
     const hRad = this.heading * DEG;
     const fwd = new THREE.Vector3(Math.sin(hRad), 0, -Math.cos(hRad));
-    const worldPerKn = 7;
-    this.pos.addScaledVector(fwd, this.speedKn * worldPerKn * dt);
+    const wRad = this.windFrom * DEG;
+    const windVec = new THREE.Vector3(-Math.sin(wRad), 0, Math.cos(wRad));
+    const WORLD_PER_KN = 7.5;
+    this.pos.addScaledVector(fwd, this.speedKn * WORLD_PER_KN * dt);
+    // Leeway: a badly-drawing sail pushes her sideways instead of forwards.
+    const leeway = (1 - power) * this.trim * 0.5 + 0.06;
+    this.pos.addScaledVector(windVec, leeway * WORLD_PER_KN * dt * windScale);
 
-    // fend off if she'd drive onto the pier
+    // Fend off the quay rather than sailing through it.
     const dist = Math.hypot(this.pos.x - this.berth.x, this.pos.z - this.berth.z);
-    if (dist < 8 && this.speedKn > 1) this.speedKn *= 0.9;
-
-    // ride the swell
-    const wy = waveHeight(this.pos.x, this.pos.z, this.t);
-    this.ship.position.set(this.pos.x, wy, this.pos.z);
-    this.ship.rotation.y = -hRad;
-    const e = 4;
-    const hx = waveHeight(this.pos.x + e, this.pos.z, this.t) - waveHeight(this.pos.x - e, this.pos.z, this.t);
-    const hz = waveHeight(this.pos.x, this.pos.z + e, this.t) - waveHeight(this.pos.x, this.pos.z - e, this.t);
-    this.ship.rotation.z = -clamp(hx / e, -0.3, 0.3) + this.rudder * 0.08;
-    this.ship.rotation.x = clamp(hz / e, -0.3, 0.3);
-    if (this.sail) this.sail.material.opacity = 1;
-
-    // dockable?
-    const aligned = angleDiff(this.heading, this.berthHeading) < 55;
-    this.dockable = dist < this.berthRadius && this.speedKn < 1.2 && aligned;
-    if (this.onDockableCb) this.onDockableCb(this.dockable);
-    if (this.berthRing) this.berthRing.material.opacity = this.dockable ? 0.5 : 0.28;
-
-    // chase camera
-    const camBack = 46, camUp = 22;
-    const desired = new THREE.Vector3(
-      this.pos.x - fwd.x * camBack, wy + camUp, this.pos.z - fwd.z * camBack
-    );
-    this.camera.position.lerp(desired, clamp(dt * 2.5, 0, 1));
-    this.camera.lookAt(this.pos.x + fwd.x * 20, 3, this.pos.z + fwd.z * 20);
-
-    // ocean follows the ship; feed camera + time to the shader
-    this.ocean.position.set(this.pos.x, 0, this.pos.z);
-    this.oceanUniforms.uCenter.value.set(this.pos.x, this.pos.z);
-    this.oceanUniforms.uTime.value = this.t;
-    this.oceanUniforms.uCam.value.copy(this.camera.position);
-
-    // HUD
-    if (this.onHud) {
-      this.onHud({
-        headingDeg: Math.round(this.heading),
-        speedKn: this.speedKn,
-        pos: pointOfSailName(twa),
-        distM: Math.round(dist),
-        windFrom: this.windFrom,
-        closing: this.prevDist - dist,
-      });
+    if (dist < 11) {
+      const push = new THREE.Vector3(this.pos.x - this.berth.x, 0, this.pos.z - this.berth.z);
+      if (push.lengthSq() < 1e-4) push.set(1, 0, 0);
+      push.normalize();
+      this.pos.addScaledVector(push, 11 - dist);
+      if (this.speedKn > 1.6 && this.t - this.bumped > 2) {
+        this.bumped = this.t;
+        this.opts?.onMessage?.("You clout the quay. Mind her way next time.");
+      }
+      this.speedKn *= 0.86;
     }
-    this.prevDist = dist;
+
+    // Ride the swell: the hull sits on the true Gerstner surface and trims to
+    // its normal, so she pitches into head seas and rolls across beam seas.
+    const g = gerstner(this.pos.x, this.pos.z, this.t, this._tmp);
+    const grp = this.ship3d.group;
+    grp.position.set(g.x, g.y, g.z);
+    grp.rotation.set(0, -hRad, 0);
+
+    const n = waveNormal(this.pos.x, this.pos.z, this.t, 4);
+    const roll = Math.asin(clamp(n.x * Math.cos(hRad) - n.z * Math.sin(hRad), -1, 1));
+    const pitch = Math.asin(clamp(n.x * Math.sin(hRad) + n.z * Math.cos(hRad), -1, 1));
+    const heelSign = Math.sin((this.heading - this.windFrom) * DEG);
+    const heel = heelSign * this.trim * power * 0.20 * windScale;
+    grp.rotation.z = -roll * 0.75 + heel;
+    grp.rotation.x = pitch * 0.75;
+
+    const speedFrac = this.speedKn / this.maxKn;
+    const night = 1 - clamp((this.sky.sunDir.y + 0.12) / 0.42, 0, 1);
+    this.ship3d.update(dt, { speedFrac, trim: this.trim, rudder: this.rudder, night, t: this.t });
+
+    this.wake.push(g.x, g.y, g.z, hRad, speedFrac);
+    if (speedFrac > 0.18 && Math.random() < speedFrac * dt * 12) this.ocean.addWake(g.x, g.z);
+
+    const p = this.sky.palette;
+    this.hemi.intensity = 0.35 + p.ambient * 0.6;
+    this.hemi.color.copy(p.horizon);
+    this.sun.color.copy(p.sunColor);
+    this.sun.intensity = 0.25 + p.intensity * 1.7;
+    this.sun.position.copy(this.sky.sunDir).multiplyScalar(240).add(grp.position);
+    this.sun.target.position.copy(grp.position);
+    this.sun.target.updateMatrixWorld();
+
+    this.ocean.update(this.t, this.pos, this.camera, { ...p, sunDir: this.sky.sunDir });
+    this.harbour.update(this.t, night);
+
+    const aligned = angleDiff(this.heading, this.berthHeading) < 60;
+    const slow = this.speedKn < 1.4;
+    const inside = dist < this.berthRadius;
+    this.dockable = inside && slow && aligned && !this.arrived;
+    this.harbour.setDockable(this.dockable);
+    this.onDockableCb?.(this.dockable, { inside, slow, aligned });
+
+    this._camera(dt, fwd, g, speedFrac);
+
+    this.onHud?.({
+      headingDeg: Math.round(this.heading),
+      speedKn: this.speedKn,
+      maxKn: this.maxKn,
+      trim: this.trim,
+      pointOfSail: pointOfSail(twa),
+      twa: Math.round(twa),
+      distM: Math.round(dist),
+      progress: clamp(1 - dist / this.startDist, 0, 1),
+      windFrom: this.windFrom,
+      windKn: this.windKn,
+      inIrons: twa < 30,
+      dockable: this.dockable,
+      night,
+    });
+  }
+
+  _camera(dt, fwd, g, speedFrac) {
+    let desired, look;
+    if (this.camMode === 0) {
+      const back = 52 + speedFrac * 16;
+      desired = new THREE.Vector3(g.x - fwd.x * back, g.y + 26, g.z - fwd.z * back);
+      look = new THREE.Vector3(g.x + fwd.x * 26, g.y + 5, g.z + fwd.z * 26);
+    } else if (this.camMode === 1) {
+      const side = new THREE.Vector3(fwd.z, 0, -fwd.x);
+      desired = new THREE.Vector3(
+        g.x - fwd.x * 30 + side.x * 34, g.y + 11, g.z - fwd.z * 30 + side.z * 34);
+      look = new THREE.Vector3(g.x, g.y + 8, g.z);
+    } else {
+      // Masthead: high up the main, looking out over the bow at the horizon
+      // rather than straight down at the deck.
+      desired = new THREE.Vector3(g.x - fwd.x * 2, g.y + 40, g.z - fwd.z * 2);
+      look = new THREE.Vector3(g.x + fwd.x * 260, g.y + 26, g.z + fwd.z * 260);
+    }
+    this.camera.position.lerp(desired, clamp(dt * 2.6, 0, 1));
+    if (!this._look) this._look = look.clone();
+    this._look.lerp(look, clamp(dt * 3.4, 0, 1));
+    this.camera.lookAt(this._look);
   }
 
   _loop() {
@@ -416,14 +380,5 @@ export class Voyage {
     this._update(dt);
     this.renderer.render(this.scene, this.camera);
     this._raf = requestAnimationFrame(() => this._loop());
-  }
-
-  stop() {
-    this.running = false;
-    if (this._raf) cancelAnimationFrame(this._raf);
-    window.removeEventListener("keydown", this._onKeyDown);
-    window.removeEventListener("keyup", this._onKeyUp);
-    window.removeEventListener("resize", this._onResize);
-    this.keys.clear();
   }
 }
