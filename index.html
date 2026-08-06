@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Tradewinds</title>
+  <meta name="description" content="A merchant-shipping economy game — trade out of Lisbon and dock your ship by hand. Age of Sail." />
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>%E2%9A%93</text></svg>" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three.module.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app">
+
+    <!-- ============ TITLE ============ -->
+    <section id="title-screen" class="screen active">
+      <div class="title-inner">
+        <p class="eyebrow">Elyndra Trading Co. · Anno 1620</p>
+        <h1 class="game-title">TRADEWINDS</h1>
+        <p class="tagline">You plan like a broker and dock like a captain.</p>
+        <p class="blurb">
+          A modest house on the Tagus. One tired caravel, a small line of credit, and the whole
+          Atlantic to trade. Buy low, plot a course, bring her alongside by your own hand, and sell dear.
+        </p>
+        <button id="start-btn" class="btn btn-lg">Take command ⚓</button>
+        <p class="hint">Best with a keyboard. Arrow keys steer; the rest you'll learn at the helm.</p>
+      </div>
+    </section>
+
+    <!-- ============ PORT / DOCKS ============ -->
+    <section id="port-screen" class="screen">
+      <header class="topbar">
+        <div class="topbar-left">
+          <span class="brand">TRADEWINDS</span>
+          <span id="port-name" class="port-name">Lisbon</span>
+        </div>
+        <div class="topbar-right">
+          <div class="stat"><span class="stat-label">Cash</span><span id="stat-cash" class="stat-val">£1,200</span></div>
+          <div class="stat"><span class="stat-label">Hold</span><span id="stat-hold" class="stat-val">0 / 40</span></div>
+          <div class="stat"><span class="stat-label">Net worth</span><span id="stat-net" class="stat-val">£1,200</span></div>
+          <div class="stat"><span class="stat-label">Day</span><span id="stat-day" class="stat-val">1</span></div>
+        </div>
+      </header>
+
+      <div class="port-body">
+        <div class="panel market-panel">
+          <div class="panel-head">
+            <h2>The Exchange</h2>
+            <p id="port-flavor" class="panel-sub">Prices move with supply, demand — and your own trades.</p>
+          </div>
+          <div class="market-table-wrap">
+            <table class="market-table">
+              <thead>
+                <tr>
+                  <th>Commodity</th>
+                  <th class="num">Here</th>
+                  <th class="num">In hold</th>
+                  <th class="num">Avg cost</th>
+                  <th class="actions">Trade</th>
+                </tr>
+              </thead>
+              <tbody id="market-rows"></tbody>
+            </table>
+          </div>
+          <p id="trade-msg" class="trade-msg"></p>
+        </div>
+
+        <aside class="panel voyage-panel">
+          <div class="panel-head">
+            <h2>Set a course</h2>
+            <p class="panel-sub">Where the goods are wanted, not where they're made.</p>
+          </div>
+          <div id="dest-list" class="dest-list"></div>
+          <button id="sail-btn" class="btn btn-lg btn-sail" disabled>Choose a destination</button>
+          <div class="ship-card">
+            <div class="ship-card-head">
+              <span id="ship-name">Andorinha</span>
+              <span class="ship-type">Caravel</span>
+            </div>
+            <div class="ship-stats">
+              <div><span>Hold</span><b id="ship-hold">40 tuns</b></div>
+              <div><span>Best speed</span><b id="ship-speed">7 kn</b></div>
+              <div><span>Rig</span><b>Lateen</b></div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ============ VOYAGE / HELM ============ -->
+    <section id="voyage-screen" class="screen">
+      <canvas id="sea"></canvas>
+
+      <div id="hud" class="hud">
+        <div class="hud-top">
+          <div class="hud-block">
+            <span class="hud-label">Bound for</span>
+            <span id="hud-dest" class="hud-strong">—</span>
+          </div>
+          <div class="hud-block hud-wind">
+            <span class="hud-label">Wind</span>
+            <span id="hud-wind" class="hud-strong">—</span>
+            <div class="wind-dial"><div id="wind-arrow" class="wind-arrow"></div></div>
+          </div>
+        </div>
+
+        <div class="hud-instruments">
+          <div class="inst"><span class="inst-label">Heading</span><span id="i-heading" class="inst-val">000°</span></div>
+          <div class="inst"><span class="inst-label">Speed</span><span id="i-speed" class="inst-val">0.0 kn</span></div>
+          <div class="inst"><span class="inst-label">Point of sail</span><span id="i-pos" class="inst-val">—</span></div>
+          <div class="inst"><span class="inst-label">To berth</span><span id="i-dist" class="inst-val">— m</span></div>
+        </div>
+
+        <div id="dock-prompt" class="dock-prompt">Press <b>SPACE</b> to make fast</div>
+
+        <div class="hud-controls">
+          <span class="key">▲ / ▼ trim sail</span>
+          <span class="key">◀ / ▶ rudder</span>
+          <span class="key">SPACE make fast</span>
+        </div>
+      </div>
+
+      <div id="arrival" class="arrival">
+        <div class="arrival-card">
+          <p class="eyebrow" id="arrival-eyebrow">Made fast alongside</p>
+          <h2 id="arrival-title">Porto</h2>
+          <p id="arrival-note" class="arrival-note"></p>
+          <button id="arrival-btn" class="btn btn-lg">Go ashore</button>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <script type="module" src="./src/game.js"></script>
+</body>
+</html>
