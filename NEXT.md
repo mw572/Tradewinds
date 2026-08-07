@@ -16,44 +16,36 @@ headless campaigns), `node qa/browser.cjs` (70, needs a server on :8749 and
 `things` repo as `tradewinds/index.html`. Pages on the game's own repo has been
 unreliable; `things` works.
 
-## The honest gap
+## What each age now actually has
 
-Marcus's words, and he is right: *"steam and box doesn't use different ship and
-dynamics, same maps and counting house etc."*
+All six of the surfaces that used to be shared are now per-era:
 
-The three ages currently share one shell. What genuinely differs is the data —
-goods, ports, hulls, refits, currency, wages, interest, hazard, milestones,
-bunkers, passage times. What does **not** differ is everything the player looks
-at and touches:
+| Surface | Sail 1620 | Steam 1880 | Box 1985 |
+|---|---|---|---|
+| Vessel | Caravel: sheer, castles, square rig, lateen mizzen | Tramp: riveted iron, three islands, funnel, derricks | Feeder: flat hull, bulbous bow, stacked boxes, gantry-served |
+| Propulsion | Sail polar, no-go zone, in irons | Telegraph with engine-room lag, screw wash on the rudder | Same, plus far more inertia and a lazier turn |
+| Berth | Stone mole, bollards, hand crane | Coaling staithes, rail sidings, goods shed | Concrete apron, quay gantries, box yard, straddle carriers |
+| Chart | Portolan: parchment, rhumbs, cartouche | Admiralty: soundings, contours, lights, cables | Service network: rotation list, nodes, transit times |
+| Language | Exchange, Commissions, Counting house | The Baltic, Fixtures, The office | Rate board, Bookings, Head office |
+| Instruments | Point of sail, Canvas | Engine, Revolutions, telegraph | Engine, Power, throttle |
 
-| Surface | Now | Should be |
-|---|---|---|
-| Chart | 1620 portolan in all three ages | Steam: an Admiralty chart — soundings in fathoms, lighthouse characteristics, cable routes, steamer tracks, coaling stations marked. Box: a schedule/network view — a liner-service loop with berth windows and transit times, not a map you plot courses on |
-| Helm | Sails and point-of-sail in all three | Steam: engine-room telegraph, ahead/astern, boiler pressure, steerage way, no wind term. Box: bridge console, bow thruster, pilot aboard, berthing by metres-per-minute closing speed |
-| 3-D vessel | The caravel in all three | A steamer (single funnel, counter stern, derricks, no square rig) and a boxship (flat deck, bay/row/tier stacks, deckhouse aft, gantry-served berth) |
-| Tab names | "Counting house", "Commissions", "The Exchange" | Steam: "The office", "Fixtures", "The Baltic". Box: "Head office", "Bookings", "The rate board" |
-| Harbour | Stone quay, cathedral, moored sailing craft | Steam: coaling staithes, cranes, rail sidings, smoke. Box: container gantries, stacked boxes, straddle carriers, no town at all |
-| Money | £/$ symbol swap only | Per-era number formatting and orders of magnitude in the UI |
+Weather is shared but reads differently: cloud cover, overcast light and rain
+are derived from the wind, and a gale is dangerous under canvas, uncomfortable
+under steam and a schedule risk for a box ship.
 
-## The order I would do it in
+## What is still worth doing
 
-1. **Era-specific 3-D vessels** (`src/ship3d.js`). Biggest visual payoff. The
-   hull loft already takes dimensions, so a steamer is mostly a different
-   superstructure, funnel and stern, and a boxship is a flat-decked hull with
-   instanced container stacks. `Ship3D` should dispatch on `spec.era`.
-2. **Era-specific helm physics** (`src/sailing.js`). `ERA.propulsion` already
-   exists and is unused. Wind drives `sailPower` only for `wind`; steam and
-   diesel want a throttle, a telegraph lag, and no no-go zone. Docking stays the
-   skill in all three, but the failure modes differ.
-3. **Era-specific chart** (`src/chart.js`). Split into three renderers over the
-   same projection and coastline data. The portolan is written; the Admiralty
-   chart and the network diagram are new.
-4. **Era-specific harbours** (`src/harbour.js`). Drive furniture off
-   `ERA` + `port.berth.style` rather than style alone.
-5. **Era-specific UI language** (`index.html`, `src/game.js`). Tab labels,
-   panel headings and flavour text from a per-era strings table.
-6. **Town density** (task #9, never done). Buildings are sparse and small on the
-   headland; needs more of them, varied massing, chimneys, trees, quay clutter.
+1. **The economy does not yet know about the eras' own pressures.** Steam should
+   punish a badly-planned bunker leg much harder, and Box should pay on
+   schedule reliability rather than on the spread — being late ought to cost
+   more than being slow, which is the tagline and is not yet true in the model.
+2. **Moored shipping is still sailing craft in every age.** A coaling berth
+   should have steamers alongside and a terminal should have a boxship working.
+3. **Port character.** Every harbour is the same generator with a different
+   scale; Lisbon and São Tomé should not feel alike.
+4. **Sound.** There is none.
+5. **The town is still a field of boxes with roofs.** Streets, walls, a quay
+   frontage rather than scattered houses.
 
 ## Traps found the hard way, do not re-learn these
 
