@@ -17,6 +17,8 @@ import { Ocean, gerstner, waveNormal } from "./ocean.js";
 import { Sky } from "./sky.js";
 import { Ship3D, Wake } from "./ship3d.js";
 import { Harbour } from "./harbour.js";
+import { SkyEnvironment, PostFX, fitShadowToShip } from "./render.js";
+import { makeProbes, floatOn, bowRise, groundCheck, boxCheck } from "./hydro.js";
 
 const DEG = Math.PI / 180;
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -60,6 +62,7 @@ export class Voyage {
     this.renderer.toneMappingExposure = 1.15;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.autoUpdate = true;
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(52, 1, 0.8, 12000);
@@ -74,11 +77,18 @@ export class Voyage {
     this.scene.add(this.hemi);
     this.sun = new THREE.DirectionalLight(0xfff0d0, 1.6);
     this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(1024, 1024);
-    const sc = this.sun.shadow.camera;
-    sc.near = 1; sc.far = 500; sc.left = -100; sc.right = 100; sc.top = 100; sc.bottom = -100;
+    // 2048 over a frustum fitted to the ship gives roughly 0.1 units per texel
+    // on a 26-unit hull. The old 1024 over the whole 1500-unit harbour gave 1.5
+    // units per texel — half a caravel's beam — so the ship had no shadow worth
+    // the name and the map was spent on empty hillside.
+    this.sun.shadow.mapSize.set(2048, 2048);
+    this.sun.shadow.bias = -0.0006;
+    this.sun.shadow.normalBias = 0.6;
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
+
+    this.skyEnv = new SkyEnvironment(this.renderer);
+    this.post = null;   // built on first resize, once the canvas has a size
 
     this.wake = new Wake(110);
     this.scene.add(this.wake.mesh);
@@ -142,6 +152,8 @@ export class Voyage {
       this.ship3d = new Ship3D(opts.shipSpec || {});
       this.scene.add(this.ship3d.group);
       this._specKey = specKey;
+      this.probes = makeProbes(this.ship3d.len, this.ship3d.beam);
+      this.draft = this.ship3d.dims.draft;
     }
 
     if (this.harbour) { this.scene.remove(this.harbour.group); this.harbour.dispose(); }
@@ -158,6 +170,7 @@ export class Voyage {
     const berthR = eraId === "box" ? 44 : eraId === "steam" ? 34 : 26;
     this.harbour = new Harbour(opts.port, this.berth, this.berthHeading, berthR, eraId);
     this.scene.add(this.harbour.group);
+    this.colliders = this.harbour.colliders || [];
 
     // Seaward is the opposite of the direction the harbour builds its land in.
     const bRad = this.berthHeading * DEG;
@@ -229,6 +242,7 @@ export class Voyage {
     this._buildRain();
 
     this.wake.clear();
+    this._refreshEnv = true;
     this.sky.setTime(opts.dayFraction ?? 0.42, (this.windFrom + 140) % 360);
 
     window.addEventListener("keydown", this._onKeyDown, { passive: false });
@@ -315,6 +329,14 @@ export class Voyage {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    try {
+      if (!this.post) this.post = new PostFX(this.renderer, this.scene, this.camera);
+      else this.post.setSize(w, h, this.renderer.getPixelRatio());
+    } catch (e) {
+      // A device that cannot allocate the extra render targets still gets a
+      // playable game, just without the polish.
+      this.post = null;
+    }
   }
 
   /** Called by SPACE and by the on-screen dock button. */
@@ -409,75 +431,69 @@ export class Voyage {
     this.pos.addScaledVector(fwd, this.speedKn * WORLD_PER_KN * dt);
     this.pos.addScaledVector(windVec, leeway * WORLD_PER_KN * dt * windScale);
 
-    // Ground her rather than letting her sail through the coast. The terrain
-    // has a height function; anything shallower than the draft is not water.
+    // Collision. Every probe on the hull is tested against the ground and
+    // against the harbour's solid boxes, and the worst contact decides. Testing
+    // the whole hull rather than a single centre point is what lets her touch
+    // bow-first on a shoal and swing, instead of stopping dead as a point mass.
     if (this.harbour?.groundAt && this._sideB) {
-      const along = this.pos.x * this._fwdB.x + this.pos.z * this._fwdB.z;
-      const off = this.pos.x * this._sideB.x + this.pos.z * this._sideB.z;
-      const g0 = this.harbour.groundAt(along, off);
-      const DRAFT = -3.0;
-      if (g0 > DRAFT) {
-        // Push back down the steepest seaward gradient until she floats.
-        const e = 6;
-        const gA = this.harbour.groundAt(along + e, off) - this.harbour.groundAt(along - e, off);
-        const gO = this.harbour.groundAt(along, off + e) - this.harbour.groundAt(along, off - e);
-        const push = new THREE.Vector3(
-          -(this._fwdB.x * gA + this._sideB.x * gO),
-          0,
-          -(this._fwdB.z * gA + this._sideB.z * gO));
-        if (push.lengthSq() < 1e-6) push.copy(this._sideB).negate();
-        push.normalize();
-        this.pos.addScaledVector(push, Math.min(9, (g0 - DRAFT) * 0.8 + 1.2));
+      const g = groundCheck(this.probes, this.pos.x, this.pos.z, hRad,
+        this.draft, this.harbour.groundAt, this._fwdB, this._sideB);
+      if (g) {
+        this.pos.addScaledVector(g.dir, Math.min(7, g.depth * 0.7 + 0.8));
         if (this.speedKn > 1.2 && this.t - this.bumped > 3) {
           this.bumped = this.t;
-          this.opts?.onMessage?.("You touch the bottom. Get her off before the tide leaves you.");
+          this.opts?.onMessage?.(this.propulsion === "wind"
+            ? "You touch the bottom. Get her off before the tide leaves you."
+            : "She takes the ground. Full astern.");
         }
-        this.speedKn *= 0.80;
+        // Grounding scrubs speed hard, and harder the deeper she is in.
+        this.speedKn *= Math.max(0.35, 1 - g.depth * 0.10);
+      }
+
+      for (const box of this.colliders) {
+        const c = boxCheck(this.probes, this.pos.x, this.pos.z, hRad, box);
+        if (!c) continue;
+        this.pos.addScaledVector(c.dir, c.depth + 0.2);
+        // Only the component of way carrying her into the wall is lost.
+        const into = -(fwd.x * c.dir.x + fwd.z * c.dir.z);
+        if (into > 0) {
+          if (this.speedKn * into > 1.4 && this.t - this.bumped > 2.5) {
+            this.bumped = this.t;
+            this.opts?.onMessage?.("You strike the quay. That will have started a plank.");
+          }
+          this.speedKn *= 1 - into * 0.55;
+        }
       }
     }
 
-    // Fend off the quay rather than sailing through it.
     const dist = Math.hypot(this.pos.x - this.berth.x, this.pos.z - this.berth.z);
-    if (dist < 11) {
-      const push = new THREE.Vector3(this.pos.x - this.berth.x, 0, this.pos.z - this.berth.z);
-      if (push.lengthSq() < 1e-4) push.set(1, 0, 0);
-      push.normalize();
-      this.pos.addScaledVector(push, 11 - dist);
-      if (this.speedKn > 1.6 && this.t - this.bumped > 2) {
-        this.bumped = this.t;
-        this.opts?.onMessage?.("You clout the quay. Mind her way next time.");
-      }
-      this.speedKn *= 0.86;
-    }
 
-    // Ride the swell: the hull sits on the true Gerstner surface and trims to
-    // its normal, so she pitches into head seas and rolls across beam seas.
+    // Buoyancy. The hull is floated on a plane fitted through eleven probes
+    // spread over its waterplane, so a wave shorter than the ship lifts one end
+    // and not the other. The single-sample version could not pitch at all.
+    const speedFracNow = this.speedKn / this.maxKn;
+    const f = floatOn(this.probes, this.pos.x, this.pos.z, hRad, this.t);
     const g = gerstner(this.pos.x, this.pos.z, this.t, this._tmp);
     const grp = this.ship3d.group;
-    grp.position.set(g.x, g.y, g.z);
+    grp.position.set(g.x, f.y + bowRise(speedFracNow, this.ship3d.len) * 0.35, g.z);
     grp.rotation.set(0, -hRad, 0);
 
-    const n = waveNormal(this.pos.x, this.pos.z, this.t, 4);
-    const roll = Math.asin(clamp(n.x * Math.cos(hRad) - n.z * Math.sin(hRad), -1, 1));
-    const pitch = Math.asin(clamp(n.x * Math.sin(hRad) + n.z * Math.cos(hRad), -1, 1));
-
-    // Heel is a damped spring rather than a value assigned straight from the
-    // wind. A hull has mass and a righting moment: she leans INTO a gust over a
-    // second or so, hangs there, and rolls back upright when it eases. Setting
-    // the angle directly made her snap between attitudes like a hinge.
-    // Under canvas she heels to the wind; under power she heels into her turn,
-    // which is the opposite direction and a completely different feel.
+    // Attitude. Heel is a damped spring rather than an assigned angle, so she
+    // leans into a gust over a second or so, hangs there, and rolls back when it
+    // eases. Under canvas she heels away from the wind; under power she heels
+    // into her turn, which is the opposite direction and a different feel.
     const heelTarget = this.propulsion === "wind"
-      ? -roll * 0.72 + Math.sin((this.heading - this.windFrom) * DEG) * this.trim * power * 0.30 * windScale
-      : -roll * 0.62 - this.rudder * (this.speedKn / this.maxKn) * 0.16;
-    const STIFF = 26, DAMP = 6.4;        // righting moment, and the water's drag on it
+      ? -f.roll * 0.92 + Math.sin((this.heading - this.windFrom) * DEG) * this.trim * power * 0.30 * windScale
+      : -f.roll * 0.82 - this.rudder * speedFracNow * 0.16;
+    const STIFF = 26, DAMP = 6.4;        // righting moment, and the water's drag
     this.heelVel += (heelTarget - this.heelAngle) * STIFF * dt - this.heelVel * DAMP * dt;
-    this.heelAngle += this.heelVel * dt;
-    this.heelAngle = clamp(this.heelAngle, -0.55, 0.55);
+    this.heelAngle = clamp(this.heelAngle + this.heelVel * dt, -0.55, 0.55);
 
-    // Pitch: the swell drives it, and driving hard into a head sea lifts the bow.
+    // Pitch: the fitted plane drives it, driving hard lifts the bow, and a hull
+    // coming out of the water over a crest drops it again, which is a slam.
     const bury = clamp(Math.cos(twa * DEG), -1, 1) * -1;
-    const pitchTarget = pitch * 0.72 + bury * (this.speedKn / this.maxKn) * 0.05;
+    const pitchTarget = f.pitch * 0.92 + bury * speedFracNow * 0.05
+      - (1 - f.wetness) * speedFracNow * 0.10;
     this.pitchVel += (pitchTarget - this.pitchAngle) * 30 * dt - this.pitchVel * 7 * dt;
     this.pitchAngle += this.pitchVel * dt;
 
@@ -486,6 +502,7 @@ export class Voyage {
 
     const speedFrac = this.speedKn / this.maxKn;
     const night = 1 - clamp((this.sky.sunDir.y + 0.12) / 0.42, 0, 1);
+    this._night = night;
     this.ship3d.update(dt, { speedFrac, trim: this.trim, rudder: this.rudder, night, t: this.t });
 
     this.wake.push(g.x, g.y, g.z, hRad, speedFrac);
@@ -499,13 +516,23 @@ export class Voyage {
     const overcast = clamp(0.12 + this.weather * 0.85, 0, 1);
     this.sun.intensity = (0.55 + p.intensity * 1.85) * (1 - overcast * 0.62);
     this.hemi.intensity *= 1 + overcast * 0.25;
-    this.sun.position.copy(this.sky.sunDir).multiplyScalar(240).add(grp.position);
-    this.sun.target.position.copy(grp.position);
-    this.sun.target.updateMatrixWorld();
+    fitShadowToShip(this.sun, grp.position, this.sky.sunDir, this.ship3d.len * 1.5);
 
     // Sky and weather.
     const cover = clamp(0.12 + this.weather * 0.85 + this.gust * 0.06, 0, 1);
     this.sky.setWeather(cover, this.windFrom, this.t);
+    // The scene's reflected light is the game's own sky. Rebuilding a
+    // prefiltered radiance map is expensive, so the key deliberately ignores the
+    // gust: cover wobbles continuously with it, and keying on that regenerated
+    // the map several times a second and stalled the whole frame.
+    const envKey = `${Math.round(this.sky.sunDir.y * 8)}|${Math.round(this.weather * 3)}`;
+    if ((this._refreshEnv || envKey !== this._envKey) && this.t - (this._envAt || -99) > 4) {
+      this._envKey = envKey;
+      this._envAt = this.t;
+      this._refreshEnv = false;
+      this.scene.environment = this.skyEnv.update(this.sky.mesh, envKey);
+      this.scene.environmentIntensity = 0.9;
+    }
     this._updateRain(dt);
 
     this.ocean.update(this.t, this.pos, this.camera, { ...p, sunDir: this.sky.sunDir },
@@ -588,7 +615,12 @@ export class Voyage {
     const dt = Math.min(this.clock.getDelta(), 0.05);
     this.t += dt;
     this._update(dt);
-    this.renderer.render(this.scene, this.camera);
+    if (this.post) {
+      this.post.setNight(this._night || 0);
+      this.post.render(dt);
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
     this._raf = requestAnimationFrame(() => this._loop());
   }
 }

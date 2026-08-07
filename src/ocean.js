@@ -196,9 +196,14 @@ const FRAG = /* glsl */ `
     float f0 = 0.02;
     float fres = f0 + (1.0 - f0) * pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 5.0);
 
-    // Depth tint: steeper faces read as deeper water.
+    // Body colour. This used to be mix(deep, shallow, facing^2.2), which is
+    // backwards: a calm sea is almost entirely facing straight up, so the whole
+    // ocean rendered in the shallow colour and deep water only appeared on the
+    // steep face of a wave. Open water is deep; the lighter tint belongs on the
+    // wave faces that are catching light, and genuine shallows are handled by
+    // the shoaling term further down.
     float facing = clamp(dot(N, vec3(0.0, 1.0, 0.0)), 0.0, 1.0);
-    vec3 body = mix(uDeep, uShallow, pow(facing, 2.2));
+    vec3 body = mix(uDeep, uShallow, pow(1.0 - facing, 1.3) * 0.75);
 
     // Subsurface glow through the back of a wave, lit from behind.
     float back = pow(clamp(dot(V, -L) * 0.5 + 0.5, 0.0, 1.0), 3.0);

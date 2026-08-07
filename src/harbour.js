@@ -40,6 +40,9 @@ export class Harbour {
 
     this.group = new THREE.Group();
     this.lights = [];
+    // Boxes a hull can strike. Everything solid in a harbour is a box, and a
+    // swept-hull-against-triangle-soup test would cost more than the frame.
+    this.colliders = [];
 
     const hRad = (headingDeg * Math.PI) / 180;
     const fwd = new THREE.Vector3(Math.sin(hRad), 0, -Math.cos(hRad));   // along the berth
@@ -242,6 +245,8 @@ export class Harbour {
     pier.castShadow = true; pier.receiveShadow = true;
     this.group.add(pier);
     const quayEdge = quayW / 2 + 4 * S;   // offshore distance of the quay face
+    const pc = at(0, quayEdge, 0);
+    this.colliders.push({ x: pc.x, z: pc.z, hw: quayW / 2, hl: quayLen / 2, rot: hRad });
 
     // Fenders down the quay face, so a hull has something to lie against.
     for (let a = -quayLen * 0.45; a <= quayLen * 0.45; a += 11 * S) {

@@ -273,6 +273,41 @@ const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name) });
     `the scene renders real content, not a flat fill (${Math.round(canvasShot.length / 1024)} KB of PNG)`);
   fs.writeFileSync(path.join(SHOTS, '05a-canvas-only.png'), canvasShot);
 
+  // The render pipeline: PBR needs something to reflect, or every material is
+  // lit as if it were in a black room.
+  const gfx = await page.evaluate(() => {
+    const v = window.__tw.state.voyage;
+    return {
+      env: !!v.scene.environment,
+      post: !!v.post,
+      shadow: v.sun.shadow.mapSize.width,
+      shadowSpan: Math.round(v.sun.shadow.camera.right * 2),
+      probes: v.probes ? v.probes.length : 0,
+      colliders: v.colliders ? v.colliders.length : 0,
+    };
+  });
+  check(gfx.env, 'the scene has an environment map to reflect');
+  check(gfx.post, 'post-processing is running');
+  check(gfx.shadow >= 2048, `the shadow map is ${gfx.shadow}px`);
+  check(gfx.shadowSpan < 200, `and fitted to the ship, not the harbour (${gfx.shadowSpan} units across)`);
+  check(gfx.probes >= 12, `the hull floats on ${gfx.probes} probes, not one point`);
+  check(gfx.colliders >= 1, 'and the quay is solid');
+
+  // Buoyancy: she must pitch and roll independently, which one sample cannot do.
+  const motion = await page.evaluate(async () => {
+    const v = window.__tw.state.voyage;
+    const P = [], R = [], Y = [];
+    for (let i = 0; i < 40; i++) {
+      P.push(v.pitchAngle); R.push(v.heelAngle); Y.push(v.ship3d.group.position.y);
+      await new Promise((r) => setTimeout(r, 55));
+    }
+    const rng = (a) => Math.max(...a) - Math.min(...a);
+    return { pitch: rng(P) * 57.3, roll: rng(R) * 57.3, heave: rng(Y) };
+  });
+  check(motion.pitch > 0.4, `she pitches in a seaway (${motion.pitch.toFixed(1)} deg)`);
+  check(motion.heave > 0.2, `and heaves (${motion.heave.toFixed(2)} units)`);
+  check(motion.pitch < 25 && motion.roll < 35, 'without throwing herself about');
+
   const heading0 = await page.textContent('#i-heading');
   check(/^\d{3}°$/.test(heading0), `the heading instrument reads out (${heading0})`);
   const pos = await page.textContent('#i-pos');

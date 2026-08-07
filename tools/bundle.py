@@ -21,7 +21,23 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Dependency order. Anything importing a module must come after it.
+# The vendored post-processing modules come first: they are plain ES modules
+# with relative imports, and the bundler resolves them by basename.
 MODULES = [
+    "Pass.js",
+    "CopyShader.js",
+    "ShaderPass.js",
+    "MaskPass.js",
+    "EffectComposer.js",
+    "RenderPass.js",
+    "LuminosityHighPassShader.js",
+    "UnrealBloomPass.js",
+    "OutputShader.js",
+    "OutputPass.js",
+    "SimplexNoise.js",
+    "SSAOShader.js",
+    "SSAOPass.js",
+    "FXAAShader.js",
     "eras.js",
     "world.js",
     "coastline.js",
@@ -30,10 +46,23 @@ MODULES = [
     "sky.js",
     "ship3d.js",
     "harbour.js",
+    "render.js",
+    "hydro.js",
     "sailing.js",
     "chart.js",
     "game.js",
 ]
+
+# Where to look for a module. src/ first, then the vendored Three.js examples.
+SEARCH = ["src", "vendor/pp/postprocessing", "vendor/pp/shaders", "vendor/pp/math"]
+
+
+def find(name):
+    for d in SEARCH:
+        p = os.path.join(ROOT, d, name)
+        if os.path.exists(p):
+            return p
+    sys.exit(f"bundle: cannot find {name} in {SEARCH}")
 
 IMPORT_RE = re.compile(
     r'^\s*import\s+(?:(?P<ns>\*\s+as\s+\w+)|(?P<named>\{[^}]*\})|(?P<def>\w+))\s+from\s+["\'](?P<src>[^"\']+)["\']\s*;?\s*$',
@@ -140,7 +169,7 @@ def verify_complete(src_dir):
     listed = {m.replace(".js", "") for m in MODULES}
     missing = []
     for name in MODULES:
-        src = open(os.path.join(src_dir, name)).read()
+        src = open(find(name)).read()
         for m in IMPORT_RE.finditer(src):
             target = m.group("src")
             if target == "three":
@@ -154,7 +183,7 @@ def verify_complete(src_dir):
     # And the order has to be a valid topological one.
     seen = set()
     for name in MODULES:
-        src = open(os.path.join(src_dir, name)).read()
+        src = open(find(name)).read()
         for m in IMPORT_RE.finditer(src):
             target = m.group("src")
             if target == "three":
@@ -176,7 +205,7 @@ def main():
 
     blocks = [three_block]
     for name in MODULES:
-        raw = open(os.path.join(src_dir, name)).read()
+        raw = open(find(name)).read()
         body, prelude, exports = rewrite(raw, name)
         key = "__" + module_key(name)
         ret = "return { " + ", ".join(exports) + " };" if exports else "return {};"
