@@ -221,6 +221,13 @@ export class Voyage {
     this.bumped = -99;
     this._look = null;
 
+    // Weather for the passage. Rough seas are dangerous under canvas, merely
+    // uncomfortable under steam, and only a schedule risk for a box ship, so
+    // the same weather is worth a different amount of worry in each age.
+    this.weather = clamp((opts.windKn - 8) / 20 + (Math.random() - 0.4) * 0.5, 0, 1);
+    this.rain = this.weather > 0.66 ? (this.weather - 0.66) / 0.34 : 0;
+    this._buildRain();
+
     this.wake.clear();
     this.sky.setTime(opts.dayFraction ?? 0.42, (this.windFrom + 140) % 360);
 
@@ -249,6 +256,56 @@ export class Voyage {
     this.canvas.removeEventListener("touchmove", this._onTouchMove);
     this.canvas.removeEventListener("touchend", this._onTouchEnd);
     this.keys.clear();
+  }
+
+  _buildRain() {
+    if (this.rainPts) { this.scene.remove(this.rainPts); this.rainPts.geometry.dispose(); }
+    if (this.rain <= 0.01) { this.rainPts = null; return; }
+    // Line segments, not points. Points render as little squares whatever you
+    // do to them; rain is a streak, and the streak is the whole read.
+    const N = Math.floor(700 + this.rain * 2000);
+    const pos = new Float32Array(N * 6);
+    const len = 3.2 + this.rain * 3.0;
+    for (let i = 0; i < N; i++) {
+      const x = (Math.random() - 0.5) * 260;
+      const y = Math.random() * 150;
+      const z = (Math.random() - 0.5) * 260;
+      pos[i * 6] = x;     pos[i * 6 + 1] = y;       pos[i * 6 + 2] = z;
+      pos[i * 6 + 3] = x; pos[i * 6 + 4] = y - len; pos[i * 6 + 5] = z;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    this.rainPts = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+      color: 0xbdd0da, transparent: true,
+      opacity: 0.16 + this.rain * 0.26, depthWrite: false,
+    }));
+    this.rainPts.frustumCulled = false;
+    this.scene.add(this.rainPts);
+  }
+
+  _updateRain(dt) {
+    if (!this.rainPts) return;
+    // The block of rain is kept centred on the ship and the drops simply fall
+    // through it, so a few thousand points cover an unbounded ocean.
+    const a = this.rainPts.geometry.attributes.position.array;
+    const fall = (48 + this.rain * 55) * dt;
+    const drift = this.windKn * 0.14 * dt;
+    const wr = (this.windFrom + 180) * DEG;
+    const dx = Math.sin(wr) * drift, dz = -Math.cos(wr) * drift;
+    const len = 3.2 + this.rain * 3.0;
+    // Six floats per drop: both ends of the streak move together.
+    for (let i = 0; i < a.length; i += 6) {
+      a[i + 1] -= fall; a[i + 4] -= fall;
+      a[i] += dx; a[i + 3] += dx;
+      a[i + 2] += dz; a[i + 5] += dz;
+      if (a[i + 1] < 0) {
+        const x = (Math.random() - 0.5) * 260, y = 150, z = (Math.random() - 0.5) * 260;
+        a[i] = x; a[i + 1] = y; a[i + 2] = z;
+        a[i + 3] = x; a[i + 4] = y - len; a[i + 5] = z;
+      }
+    }
+    this.rainPts.geometry.attributes.position.needsUpdate = true;
+    this.rainPts.position.set(this.pos.x, 0, this.pos.z);
   }
 
   _resize() {
@@ -439,10 +496,17 @@ export class Voyage {
     this.hemi.intensity = 0.62 + p.ambient * 0.72;
     this.hemi.color.copy(p.horizon);
     this.sun.color.copy(p.sunColor);
-    this.sun.intensity = 0.55 + p.intensity * 1.85;
+    const overcast = clamp(0.12 + this.weather * 0.85, 0, 1);
+    this.sun.intensity = (0.55 + p.intensity * 1.85) * (1 - overcast * 0.62);
+    this.hemi.intensity *= 1 + overcast * 0.25;
     this.sun.position.copy(this.sky.sunDir).multiplyScalar(240).add(grp.position);
     this.sun.target.position.copy(grp.position);
     this.sun.target.updateMatrixWorld();
+
+    // Sky and weather.
+    const cover = clamp(0.12 + this.weather * 0.85 + this.gust * 0.06, 0, 1);
+    this.sky.setWeather(cover, this.windFrom, this.t);
+    this._updateRain(dt);
 
     this.ocean.update(this.t, this.pos, this.camera, { ...p, sunDir: this.sky.sunDir },
       {
@@ -476,6 +540,8 @@ export class Voyage {
       windFrom: this.windFrom,
       windKn: this.windKn,
       gust: this.gust,
+      weather: this.weather,
+      rain: this.rain,
       heelDeg: Math.round((this.heelAngle * 180) / Math.PI),
       inIrons: this.propulsion === "wind" && twa < 30,
       revs: this.revs,

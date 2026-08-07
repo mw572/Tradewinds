@@ -282,7 +282,7 @@ function renderDestPanel() {
       : `<p class="empty">The hold is empty. You would be sailing in ballast.</p>`}`;
 
   btn.disabled = false;
-  btn.textContent = `Set sail for ${p.name}`;
+  btn.textContent = `${STRINGS[h.eraId].sail} ${p.name}`;
 }
 
 /* --------------------------------------------------------- commissions --- */
@@ -300,7 +300,7 @@ function renderCommissions() {
       <div class="card-head"><b>${o.qty} &times; ${GOOD[o.goodId].name}</b><span class="card-pay">${money(o.reward)}</span></div>
       <div class="card-body">To <b>${PORT[o.to].name}</b> by day ${o.dueDay} &middot; ${leg.days} days' sail
         <br/>Worth about ${money(h.market.spot(o.to, o.goodId) * o.qty)} on that market. Forfeit ${money(o.penalty)}.</div>
-      <button class="btn btn-sm" data-accept="${o.id}">Sign</button>`;
+      <button class="btn btn-sm" data-accept="${o.id}">${STRINGS[h.eraId].sign}</button>`;
     offers.appendChild(el);
   }
   offers.querySelectorAll("[data-accept]").forEach((b) =>
@@ -461,6 +461,7 @@ function startVoyage() {
   const dayFraction = 0.30 + ((h.day * 0.37) % 1) * 0.42;
 
   $("hud-dest").textContent = dest.name;
+  applyStrings(h.eraId);
   $("hud-wind").textContent = `${cardinal(windDeg)} ${windKn} kn`;
   $("dock-prompt").classList.remove("show");
   $("arrival").classList.remove("show");
@@ -499,6 +500,76 @@ function flashHelm(msg) {
 
 // The helm instruments are named for the age. A steamer has no point of sail
 // and a container ship has no canvas.
+/* Every age calls the same thing by a different name, and the names are how you
+ * know which century you are in before you have read a single number. */
+const STRINGS = {
+  sail: {
+    tabExchange: "Exchange", tabChart: "Chart", tabCommissions: "Commissions",
+    tabYard: "Shipyard", tabCounting: "Counting house",
+    exchangeTitle: "The Exchange", opsTitle: "Worth a look",
+    opsSub: "Best runs from here, after wages.",
+    chartTitle: "The chart table",
+    chartSub: "Pick your landfall. Distances are great-circle; the trades favour the southbound run.",
+    offersTitle: "On offer",
+    offersSub: "Carry a named cargo to a named port by a named day. Miss it and you forfeit.",
+    signedTitle: "Signed", signedSub: "Delivered by selling at the destination.",
+    yardTitle: "The yard", yardSub: "Hulls for sale, and refits for the one you have.",
+    fleetTitle: "Your fleet", fleetSub: "One hull sails at a time.",
+    countingTitle: "The counting house",
+    countingSub: "Credit runs at daily interest. It compounds whether you sail or not.",
+    logTitle: "Ship\u2019s log", netLabel: "Net worth", holdLabel: "Hold",
+    boundFor: "Bound for", resetBtn: "Abandon the house and start again",
+    eyebrow: "Lisbon \u00b7 Anno 1620", sign: "Sign", sail: "Set sail for",
+  },
+  steam: {
+    tabExchange: "The Baltic", tabChart: "Chart", tabCommissions: "Fixtures",
+    tabYard: "The yard", tabCounting: "The office",
+    exchangeTitle: "The Baltic Exchange", opsTitle: "Open cargoes",
+    opsSub: "Best-paying runs from here, after wages and bunkers.",
+    chartTitle: "The chart room",
+    chartSub: "Lay off your course. Steam holds her speed where canvas could not.",
+    offersTitle: "Fixtures on offer",
+    offersSub: "A charterer wants a stated tonnage at a stated port by a stated date. Miss the laycan and you pay.",
+    signedTitle: "Fixed", signedSub: "Discharged by selling at the destination.",
+    yardTitle: "The shipyard", yardSub: "Hulls on the stocks, and refits for the one you run.",
+    fleetTitle: "Your fleet", fleetSub: "One hull carries your flag at a time.",
+    countingTitle: "The office",
+    countingSub: "The mortgage runs at daily interest whether the ship earns or not.",
+    logTitle: "Deck log", netLabel: "Capital", holdLabel: "Deadweight",
+    boundFor: "Bound for", resetBtn: "Wind up the company and start again",
+    eyebrow: "Liverpool \u00b7 1880", sign: "Fix", sail: "Sail for",
+  },
+  box: {
+    tabExchange: "Rate board", tabChart: "Network", tabCommissions: "Bookings",
+    tabYard: "Fleet", tabCounting: "Head office",
+    exchangeTitle: "The rate board", opsTitle: "Where the money is",
+    opsSub: "Best contribution per slot from here, after crew and bunkers.",
+    chartTitle: "The service network",
+    chartSub: "Your rotation. The schedule is the product; the map is just where it happens.",
+    offersTitle: "Bookings on offer",
+    offersSub: "A shipper wants boxes lifted to a named port by a named day. Roll the cargo and you pay the penalty.",
+    signedTitle: "Booked", signedSub: "Closed out by discharging at the destination.",
+    yardTitle: "Tonnage", yardSub: "Hulls on the market, and upgrades for the one you operate.",
+    fleetTitle: "Your fleet", fleetSub: "One ship on service at a time.",
+    countingTitle: "Head office",
+    countingSub: "The facility accrues daily. Utilisation is the only thing that clears it.",
+    logTitle: "Voyage log", netLabel: "Net assets", holdLabel: "Slots",
+    boundFor: "Next port", resetBtn: "Wind up the line and start again",
+    eyebrow: "Rotterdam \u00b7 1985", sign: "Book", sail: "Sail for",
+  },
+};
+
+function applyStrings(eraId) {
+  const t = STRINGS[eraId] || STRINGS.sail;
+  document.querySelectorAll("[data-s]").forEach((el) => {
+    const v = t[el.dataset.s];
+    if (v !== undefined) el.textContent = v;
+  });
+  const eb = $("title-eyebrow");
+  if (eb) eb.textContent = t.eyebrow;
+  return t;
+}
+
 const HELM_LABELS = {
   sail:  { pos: "Point of sail", trim: "Canvas", key: "canvas", dock: "SPACE make fast" },
   steam: { pos: "Engine", trim: "Revolutions", key: "telegraph", dock: "SPACE ring off" },
@@ -613,6 +684,7 @@ function newGame() {
   clearSave();
   state.house = new House(Math.floor(Math.random() * 1e9), state.era);
   state.dest = null;
+  applyStrings(state.era);
   showTab("exchange");
   renderPort();
   show("port-screen");
@@ -627,6 +699,7 @@ function init() {
     $("continue-btn").addEventListener("click", () => {
       state.house = saved;
       state.era = saved.eraId;
+      applyStrings(state.era);
       showTab("exchange");
       renderPort();
       show("port-screen");

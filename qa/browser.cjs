@@ -70,6 +70,10 @@ const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name) });
   await page.waitForTimeout(200);
   const steamHulls = await page.textContent('#hulls-list');
   check(/Tramp Steamer/.test(steamHulls), 'steamers are for sale');
+  const steamTabs = (await page.locator('.tab').allTextContents()).join(' | ');
+  check(/The Baltic/.test(steamTabs) && /Fixtures/.test(steamTabs) && /The office/.test(steamTabs),
+    `the 1880 house speaks its own language (${steamTabs})`);
+  check(!/Counting house/.test(steamTabs), 'and has no counting house');
   await shot(page, '11-steam-era.png');
 
   // The steamer must actually be a different vessel, not the caravel reskinned.
@@ -124,6 +128,11 @@ const shot = (page, name) => page.screenshot({ path: path.join(SHOTS, name) });
   check(/TEU/.test(await page.textContent('#ship-hold')), 'the hold is measured in TEU');
   const boxGoods = await page.locator('#market-rows tr').allTextContents();
   check(boxGoods.some((t) => /Electronics/.test(t)), 'boxed cargo is on the exchange');
+  const boxTabs = (await page.locator('.tab').allTextContents()).join(' | ');
+  check(/Rate board/.test(boxTabs) && /Bookings/.test(boxTabs) && /Head office/.test(boxTabs),
+    `the 1985 line speaks its own language (${boxTabs})`);
+  check(/Slots/.test(await page.locator('.stat-label').allTextContents().then((a) => a.join(' '))),
+    'and measures capacity in slots');
   await shot(page, '12-box-era.png');
 
   await page.click('.tab[data-tab="chart"]'); await page.waitForTimeout(200);

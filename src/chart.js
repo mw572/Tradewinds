@@ -393,9 +393,270 @@ function course(house, dest) {
   </g>`;
 }
 
+
+/* ======================= ADMIRALTY CHART, 1880 =======================
+ * White paper, fine black linework, soundings in fathoms, lights with their
+ * characteristics, submarine cables and coaling stations. A portolan is a
+ * beautiful object; an Admiralty chart is an instrument, and by 1880 that is
+ * what is on the chart room table.
+ */
+
+// Deterministic scatter, so the soundings do not dance about between redraws.
+function seeded(n) {
+  let x = n >>> 0;
+  return () => { x = (x * 1664525 + 1013904223) >>> 0; return x / 4294967296; };
+}
+
+function admiraltyDefs() {
+  return `<defs>
+    <pattern id="dryingSand" width="5" height="5" patternUnits="userSpaceOnUse">
+      <circle cx="1.5" cy="1.5" r="0.5" fill="#8a7f63" opacity="0.5"/>
+      <circle cx="3.8" cy="3.6" r="0.4" fill="#8a7f63" opacity="0.4"/>
+    </pattern>
+    <linearGradient id="admPaper" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0%" stop-color="#fbf8ef"/>
+      <stop offset="100%" stop-color="#f0ebdc"/>
+    </linearGradient>
+  </defs>`;
+}
+
+/** Depth contours: a few smoothed offsets of the coast, as a chart would show. */
+function admiraltyContours() {
+  const out = [];
+  for (const [off, dash] of [[7, "none"], [15, "5 3"], [26, "2 3"]]) {
+    for (const [hole, area, flat] of COAST) {
+      if (hole || area < MAJOR_AREA) continue;
+      // Offset outward by pushing each point away from the ring's centroid.
+      let cx = 0, cy = 0, n = 0;
+      for (let i = 0; i < flat.length; i += 2) {
+        const q = project(flat[i + 1], flat[i]);
+        cx += q.x; cy += q.y; n++;
+      }
+      cx /= n; cy /= n;
+      let d = "";
+      for (let i = 0; i < flat.length; i += 2) {
+        const q = project(flat[i + 1], flat[i]);
+        const vx = q.x - cx, vy = q.y - cy;
+        const l = Math.hypot(vx, vy) || 1;
+        const x = q.x + (vx / l) * off, y = q.y + (vy / l) * off;
+        d += `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
+      }
+      out.push(`<path d="${d}Z" fill="none" stroke="#5f7f96" stroke-width="0.6"
+        stroke-dasharray="${dash}" opacity="0.55"/>`);
+    }
+  }
+  return `<g class="adm-contours">${out.join("")}</g>`;
+}
+
+function admiraltySoundings() {
+  const rnd = seeded(20250806);
+  const out = [];
+  // Reject anything that falls on land, so soundings only appear in water.
+  const inLand = (x, y) => COAST.some(([hole, area, flat]) => {
+    if (hole || area < 2) return false;
+    let inside = false;
+    for (let i = 0, j = flat.length - 2; i < flat.length; j = i, i += 2) {
+      const a = project(flat[i + 1], flat[i]), b = project(flat[j + 1], flat[j]);
+      if ((a.y > y) !== (b.y > y) && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+    }
+    return inside;
+  });
+  let tries = 0;
+  while (out.length < 210 && tries < 1400) {
+    tries++;
+    const x = 30 + rnd() * (VB_W - 60);
+    const y = 30 + rnd() * (VB_H - 60);
+    if (inLand(x, y)) continue;
+    // Deeper offshore: a crude but readable shelf model.
+    const shelf = Math.min(1, Math.hypot(x - 780, y - 400) / 520);
+    const depth = Math.round(6 + shelf * shelf * 2400 + rnd() * 40);
+    out.push(`<text x="${x.toFixed(0)}" y="${y.toFixed(0)}" class="adm-sounding">${depth}</text>`);
+  }
+  return `<g class="adm-soundings">${out.join("")}</g>`;
+}
+
+function admiraltyLights(house) {
+  const CHARS = ["Fl.10s", "Gp.Fl.(2)15s", "F.R.", "Fl.5s", "Occ.8s", "Gp.Fl.(3)20s"];
+  return PORTS.filter((p) => p.berth?.lighthouse).map((p, i) => {
+    const q = project(p.lat, p.lon);
+    return `<g class="adm-light">
+      <path d="M${q.x},${q.y - 9} l4,7 h-8 Z" fill="#a8322a"/>
+      <circle cx="${q.x}" cy="${q.y - 9}" r="2.6" fill="none" stroke="#a8322a" stroke-width="0.9"/>
+      <text x="${q.x + 7}" y="${q.y - 11}" class="adm-lightchar">${CHARS[i % CHARS.length]}</text>
+    </g>`;
+  }).join("");
+}
+
+function admiraltyCables() {
+  // The Atlantic telegraph and the West African coast cables, roughly where
+  // they ran. A chart of this date would show them and warn against anchoring.
+  const runs = [
+    [["bristol"], ["azores"], ["cabo_verde"], ["recife"]],
+    [["lisbon"], ["funchal"], ["canaries"], ["cabo_verde"]],
+    [["cabo_verde"], ["elmina"], ["sao_tome"]],
+  ];
+  return runs.map((run) => {
+    const d = run.map(([id], i) => {
+      const q = project(PORT[id].lat, PORT[id].lon);
+      return `${i ? "L" : "M"}${q.x.toFixed(1)},${q.y.toFixed(1)}`;
+    }).join(" ");
+    return `<path d="${d}" fill="none" stroke="#7a5a34" stroke-width="1" stroke-dasharray="1 4" opacity="0.7"/>`;
+  }).join("") +
+  `<text x="300" y="252" class="adm-note" transform="rotate(-12 300 252)">Submarine telegraph</text>`;
+}
+
+function admiraltyTitleBlock(house) {
+  const x = 40, y = 560, w = 300, h = 168;
+  return `<g class="adm-title">
+    <rect x="${x}" y="${y}" width="${w}" height="${h}" fill="#fdfbf4" stroke="#2b2b28" stroke-width="1.4"/>
+    <rect x="${x + 5}" y="${y + 5}" width="${w - 10}" height="${h - 10}" fill="none" stroke="#2b2b28" stroke-width="0.5"/>
+    <text x="${x + w / 2}" y="${y + 34}" class="adm-h1" text-anchor="middle">NORTH ATLANTIC OCEAN</text>
+    <text x="${x + w / 2}" y="${y + 54}" class="adm-h2" text-anchor="middle">EASTERN PORTION</text>
+    <line x1="${x + 40}" y1="${y + 66}" x2="${x + w - 40}" y2="${y + 66}" stroke="#2b2b28" stroke-width="0.6"/>
+    <text x="${x + w / 2}" y="${y + 88}" class="adm-small" text-anchor="middle">Soundings in fathoms at low water</text>
+    <text x="${x + w / 2}" y="${y + 106}" class="adm-small" text-anchor="middle">Heights in feet above high water</text>
+    <text x="${x + w / 2}" y="${y + 130}" class="adm-small" text-anchor="middle">Mercator projection &#183; Var. 18&#176; W (1880)</text>
+    <text x="${x + w / 2}" y="${y + 152}" class="adm-small" text-anchor="middle">Corrected to day ${house.day}</text>
+  </g>`;
+}
+
+function drawAdmiralty(house, dest) {
+  const parts = [admiraltyDefs()];
+  parts.push(`<rect width="${VB_W}" height="${VB_H}" fill="url(#admPaper)"/>`);
+
+  // Graticule: fine, ruled, with ticked borders.
+  const g = [];
+  for (let lon = -50; lon <= 15; lon += 5) {
+    const a = project(LAT_TOP, lon), b = project(LAT_BOT, lon);
+    g.push(`<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="#8a9aa6" stroke-width="${lon % 10 ? 0.3 : 0.6}" opacity="0.7"/>`);
+    if (lon % 10 === 0) g.push(`<text x="${a.x}" y="20" class="adm-grat" text-anchor="middle">${Math.abs(lon)}&#176;${lon < 0 ? "W" : "E"}</text>`);
+  }
+  for (let lat = -20; lat <= 55; lat += 5) {
+    const a = project(lat, -52), b = project(lat, 16);
+    g.push(`<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="#8a9aa6" stroke-width="${lat % 10 ? 0.3 : 0.6}" opacity="0.7"/>`);
+    if (lat % 10 === 0) g.push(`<text x="26" y="${a.y + 3}" class="adm-grat" text-anchor="end">${Math.abs(lat)}&#176;${lat < 0 ? "S" : "N"}</text>`);
+  }
+  parts.push(`<g>${g.join("")}</g>`);
+
+  parts.push(admiraltySoundings());
+  parts.push(admiraltyContours());
+
+  // Land: pale buff, firm black coastline, drying sand along the shore.
+  const fills = [], strokes = [];
+  for (const [hole, area, flat] of COAST) {
+    const d = ringPath(flat);
+    fills.push(`<path d="${d}" fill="${hole ? "url(#admPaper)" : "#e9e0c4"}"/>`);
+    strokes.push(`<path d="${d}" fill="none" stroke="#23231f" stroke-width="${area >= MAJOR_AREA ? 1.2 : 0.8}"/>`);
+  }
+  parts.push(`<g>${fills.join("")}</g><g>${strokes.join("")}</g>`);
+
+  parts.push(admiraltyCables());
+  parts.push(admiraltyLights(house));
+  parts.push(compassRose(240, 214, 44));
+  parts.push(course(house, dest));
+  parts.push(ports(house, dest));
+  parts.push(admiraltyTitleBlock(house));
+  parts.push(`<rect x="10" y="10" width="${VB_W - 20}" height="${VB_H - 20}" fill="none" stroke="#23231f" stroke-width="2"/>`);
+  return parts.join("");
+}
+
+/* ========================= SERVICE NETWORK, 1985 =========================
+ * Not a chart. A liner operator does not plot courses; they publish a rotation
+ * and sell slots against it. So this is a schematic of the service, with the
+ * geography behind it faint enough to orient by and no more.
+ */
+
+function drawNetwork(house, dest) {
+  const parts = [];
+  parts.push(`<rect width="${VB_W}" height="${VB_H}" fill="#0d1b24"/>`);
+
+  // Geography, ghosted right back.
+  const land = COAST.map(([hole, area, flat]) =>
+    `<path d="${ringPath(flat)}" fill="${hole ? "#0d1b24" : "#16242e"}" stroke="#1e3340" stroke-width="0.8"/>`).join("");
+  parts.push(`<g class="net-land">${land}</g>`);
+
+  // The rotation: the loop this service actually runs, north to south and back.
+  const open = PORTS.filter((p) => house.portOpen(p.id));
+  const rot = [...open].sort((a, b) => b.lat - a.lat).map((p) => p.id);
+  const loop = [...rot, ...rot.slice(1, -1).reverse()];
+
+  const legs = [];
+  for (let i = 0; i < loop.length - 1; i++) {
+    const a = project(PORT[loop[i]].lat, PORT[loop[i]].lon);
+    const b = project(PORT[loop[i + 1]].lat, PORT[loop[i + 1]].lon);
+    legs.push(`<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" class="net-leg"/>`);
+  }
+  parts.push(`<g class="net-legs">${legs.join("")}</g>`);
+
+  // The leg you are actually about to run, and its transit time.
+  if (dest && dest !== house.location) {
+    const a = project(PORT[house.location].lat, PORT[house.location].lon);
+    const b = project(PORT[dest].lat, PORT[dest].lon);
+    const leg = passage(house.location, dest, 18, "box");
+    parts.push(`<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" class="net-active"/>`);
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    parts.push(`<g transform="translate(${mx.toFixed(1)},${my.toFixed(1)})">
+      <rect x="-52" y="-13" width="104" height="24" rx="12" class="net-chip"/>
+      <text y="4" class="net-chiptext" text-anchor="middle">${leg.days} days transit</text></g>`);
+  }
+
+  // Ports as terminal nodes with their berth windows.
+  const nodes = PORTS.map((p) => {
+    const q = project(p.lat, p.lon);
+    const isHere = p.id === house.location;
+    const isDest = p.id === dest;
+    const shut = !house.portOpen(p.id);
+    const cls = ["net-node", isHere ? "here" : "", isDest ? "dest" : "", shut ? "shut" : ""].filter(Boolean).join(" ");
+    return { p, q, isHere, isDest, shut, cls };
+  });
+
+  const entries = nodes.map((n) => ({ name: n.p.name, x: n.q.x, y: n.q.y }));
+  placeLabels(entries);
+
+  parts.push(nodes.map((n, i) => {
+    const l = entries[i].label;
+    return `<g class="port-g ${!n.shut && !n.isHere ? "clickable" : ""}" data-port="${n.p.id}">
+      <circle cx="${n.q.x.toFixed(1)}" cy="${n.q.y.toFixed(1)}" r="16" class="port-hit"/>
+      <rect x="${(n.q.x - 5).toFixed(1)}" y="${(n.q.y - 5).toFixed(1)}" width="10" height="10" rx="2" class="${n.cls}"/>
+      <text x="${l.tx.toFixed(1)}" y="${l.ty.toFixed(1)}" text-anchor="${l.anchor}" class="net-label ${n.shut ? "shut" : ""}">${esc(n.p.name)}</text>
+    </g>`;
+  }).join(""));
+
+  // The rotation panel: the thing a liner operator actually reads.
+  const rows = rot.slice(0, 9).map((id, i) => {
+    const p = PORT[id];
+    const here = id === house.location;
+    return `<g transform="translate(0,${i * 26})">
+      <rect x="0" y="0" width="252" height="22" class="net-row ${here ? "on" : ""}"/>
+      <text x="10" y="15" class="net-rowtext ${here ? "on" : ""}">${String(i + 1).padStart(2, "0")}</text>
+      <text x="34" y="15" class="net-rowtext ${here ? "on" : ""}">${esc(p.name)}</text>
+      <text x="242" y="15" class="net-rowtext dim" text-anchor="end">${p.country}</text>
+    </g>`;
+  }).join("");
+  parts.push(`<g transform="translate(36,${VB_H - 40 - rot.slice(0, 9).length * 26})">
+    <text x="0" y="-12" class="net-h">SERVICE ROTATION</text>
+    ${rows}
+  </g>`);
+
+  parts.push(`<g transform="translate(${VB_W - 250},44)">
+    <text x="0" y="0" class="net-h">ATLANTIC LOOP</text>
+    <text x="0" y="24" class="net-kv">Ports on service<tspan x="210" text-anchor="end" class="net-kvv">${rot.length}</tspan></text>
+    <text x="0" y="46" class="net-kv">Round voyage<tspan x="210" text-anchor="end" class="net-kvv">${loop.length - 1} legs</tspan></text>
+    <text x="0" y="68" class="net-kv">Slots<tspan x="210" text-anchor="end" class="net-kvv">${house.ship.hold.toLocaleString()} TEU</tspan></text>
+    <text x="0" y="90" class="net-kv">Service speed<tspan x="210" text-anchor="end" class="net-kvv">${house.ship.speedKn} kn</tspan></text>
+  </g>`);
+
+  return parts.join("");
+}
+
 /* ---------------------------------------------------------------- draw ---- */
 
 export function drawChart(svg, house, dest) {
+  svg.setAttribute("viewBox", `0 0 ${VB_W} ${VB_H}`);
+  svg.dataset.era = house.eraId;
+  if (house.eraId === "steam") { svg.innerHTML = drawAdmiralty(house, dest); return; }
+  if (house.eraId === "box") { svg.innerHTML = drawNetwork(house, dest); return; }
+
   const parts = [
     defs(),
     paper(),

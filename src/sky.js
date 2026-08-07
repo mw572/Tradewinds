@@ -33,7 +33,23 @@ const FRAG = /* glsl */ `
   uniform vec3  uSunColor;
   uniform float uSunIntensity;
   uniform float uHaze;
+  uniform float uCover;      // 0 clear .. 1 solid overcast
+  uniform float uTime;
+  uniform vec2  uWindDir;
   varying vec3  vDir;
+
+  float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  float vn(vec2 p){
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(h21(i), h21(i + vec2(1,0)), u.x),
+               mix(h21(i + vec2(0,1)), h21(i + vec2(1,1)), u.x), u.y);
+  }
+  float fbm2(vec2 p){
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 5; i++) { v += a * vn(p); p *= 2.03; a *= 0.5; }
+    return v;
+  }
 
   void main() {
     vec3 d = normalize(vDir);
@@ -55,6 +71,25 @@ const FRAG = /* glsl */ `
     col += uSunColor * pow(mu, 220.0) * 0.9 * uSunIntensity;
     float disc = smoothstep(0.99965, 0.99988, mu);
     col += uSunColor * disc * 6.0 * uSunIntensity;
+
+    // Cloud. The dome is projected onto a plane at a nominal height so the
+    // cover stretches toward the horizon the way real cloud does, and it drifts
+    // downwind. Below the horizon there is nothing to draw.
+    if (h > 0.005 && uCover > 0.01) {
+      vec2 cp = d.xz / max(h, 0.02) * 0.55 + uWindDir * uTime * 0.006;
+      float n = fbm2(cp * 0.9);
+      // The cover threshold decides how much sky is filled; the softness of the
+      // edge decides whether it reads as fair-weather cumulus or as a front.
+      float edge = mix(0.62, 0.20, uCover);
+      float cloud = smoothstep(edge, edge + mix(0.30, 0.12, uCover), n);
+      cloud *= smoothstep(0.0, 0.16, h);                 // fade into the horizon
+      // Lit tops, dark bases: shade by a second sample offset toward the sun.
+      float lit = fbm2(cp * 0.9 + normalize(uSun.xz) * 0.22);
+      vec3 top = mix(vec3(0.96, 0.95, 0.92), uSunColor, 0.35);
+      vec3 base = mix(vec3(0.42, 0.44, 0.48), uHorizon, 0.45) * (0.55 + uSunIntensity * 0.5);
+      vec3 cc = mix(base, top, clamp((lit - n) * 3.0 + 0.55, 0.0, 1.0));
+      col = mix(col, cc, cloud * (0.55 + uCover * 0.45));
+    }
 
     gl_FragColor = vec4(col, 1.0);
   }
@@ -108,6 +143,9 @@ export class Sky {
       uSunColor:     { value: new THREE.Color(0xffffff) },
       uSunIntensity: { value: 1 },
       uHaze:         { value: 0.5 },
+      uCover:        { value: 0.25 },
+      uTime:         { value: 0 },
+      uWindDir:      { value: new THREE.Vector2(1, 0) },
     };
     this.mesh = new THREE.Mesh(
       new THREE.SphereGeometry(1, 32, 24),
@@ -132,6 +170,15 @@ export class Sky {
    * `dayFraction` 0..1 across a 24-hour day; 0.5 is noon. `bearing` in degrees
    * sets which way the sun sits, so successive voyages don't all look alike.
    */
+  /** Cloud cover 0..1, and the wind that drifts it. */
+  setWeather(cover, windFromDeg, t) {
+    this.uniforms.uCover.value = cover;
+    this.uniforms.uTime.value = t;
+    const r = ((windFromDeg + 180) * Math.PI) / 180;
+    this.uniforms.uWindDir.value.set(Math.sin(r), -Math.cos(r));
+    this.cover = cover;
+  }
+
   setTime(dayFraction, bearingDeg = 120) {
     const angle = (dayFraction - 0.25) * Math.PI * 2;   // sunrise at 0.25
     const elev = Math.sin(angle);
